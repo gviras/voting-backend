@@ -1,0 +1,85 @@
+[
+    {
+        "Timestamp": 1730562691,
+        "PrevHash": "0",
+        "Hash": "61d206a7da2e59fa514b5237c380d59a824bf1ebb17709ce1c1b7d904146fb3d",
+        "VoterKeys": [],
+        "Nonce": 0
+    },
+    {
+        "Timestamp": 1730562719,
+        "PrevHash": "61d206a7da2e59fa514b5237c380d59a824bf1ebb17709ce1c1b7d904146fb3d",
+        "Hash": "d26009e580320da07b3aeff0d37cce8d0ebb5746670e1aa8772e2dfb9d7efb6f",
+        "VoterKeys": [
+            {
+                "VoterID": "1",
+                "PublicKey": "BHK6FubiYjGLyZpAuWMrpxwiWTxA+6UwW9WTmehMhFw+fdkHHezNNHtNJB/2xdC+L1ah+dl8jZxKT2UE9zb3JLU=",
+                "IssuedAt": 1730562696,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "2",
+                "PublicKey": "BNcTMzdzGA1ZbI14m7cAXOE6WHEUtSWYFgXE3IhBDEg8VOvEbiYP2YRycXfBOvfpPdFp+RImcVoW2P4ksQieO94=",
+                "IssuedAt": 1730562700,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "3",
+                "PublicKey": "BN5tLT9veBsuwr+lljC440qXrjUBT2bUaySi4K548RCsuU03SsAcJdBNLY8YkXAmENaT6xbV6w1OkmwqQETMHn8=",
+                "IssuedAt": 1730562707,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "4",
+                "PublicKey": "BGkmE/BZnUJLHO84Dg304cMkKUznZRPdFEhm1nlyO/DKEfLgoSIdsKOZ2py3ls33SyIQJ+bfqvBL04Mx35ngpZk=",
+                "IssuedAt": 1730562712,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "1z",
+                "PublicKey": "BOnhHL0zwk/5Hbqi4mc2Yy4Bei5VVxPvjrX6eLQeCddX3Ki/8oOQF7ondSt1Hoxt713DcuBU2yhxvgAnvWTgIlI=",
+                "IssuedAt": 1730562719,
+                "HasVoted": false
+            }
+        ],
+        "Nonce": 0
+    },
+    {
+        "Timestamp": 1730562876,
+        "PrevHash": "d26009e580320da07b3aeff0d37cce8d0ebb5746670e1aa8772e2dfb9d7efb6f",
+        "Hash": "a657ad7c9828a81034c26ff681318a22a9a749ec1deee0a17f594b884dc06ff5",
+        "VoterKeys": [
+            {
+                "VoterID": "c",
+                "PublicKey": "BKLmDpfIpUkuvyuUyfB2pK3p6puFGp7h2KbSRgiXkuG5Gwpv4SI/+tFG3NDBROShjVn6pD88hD8wimsXAPN2Rqc=",
+                "IssuedAt": 1730562853,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "v",
+                "PublicKey": "BHsqj0Huo6E1v0nWwXwQEj9K5R/KJzyDAjCkQ9jLe4uaYfGeNILbc6StpjH7vTDd0QI4Luk4XZh31fhsFvebkW8=",
+                "IssuedAt": 1730562858,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "b",
+                "PublicKey": "BDZqCjcvi0tKsC9XUDq6Cwyy0ZBlsIsXpD29FL81InDpvJKplVkKxrFJVVhLJBaVj/N3XtIfX0wxqqKqB8kg/ho=",
+                "IssuedAt": 1730562862,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "n",
+                "PublicKey": "BOeOf4DNL5ISKYysoAhDB3IyT/h7j/TDEORtj+/E3qRWdbwgxrrsRWfXRJRNB0StYBBBBOljy3SNzgGsecRdcyw=",
+                "IssuedAt": 1730562867,
+                "HasVoted": true
+            },
+            {
+                "VoterID": "nx",
+                "PublicKey": "BD0AJv7p1BdSpejddyygoU01KgZipfnUIX2ycv9axMt6e0VY1GxfMa/E3mex8vufUuQ2kk9/rAq26iIcbfyS/TE=",
+                "IssuedAt": 1730562876,
+                "HasVoted": false
+            }
+        ],
+        "Nonce": 0
+    }
+]
