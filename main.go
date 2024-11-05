@@ -15,6 +15,7 @@ import (
 	"time"
 	"voting-backend/models"
 	"voting-backend/service"
+	"strconv"
 )
 
 type Config struct {
@@ -50,6 +51,51 @@ type Server struct {
 	votingService *service.VotingService
 }
 
+type AdminCredsResponse struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+}
+
+type BlockchainStatusResponse struct {
+	DKBChain *ChainInfo `json:"dkb_chain"`
+	EVBChain *ChainInfo `json:"evb_chain"`
+}
+
+type BlockchainResponse struct {
+	ChainType  string         `json:"chain_type"`
+	BlockCount int            `json:"block_count"`
+	Blocks     []*models.Block `json:"blocks"`
+	IsValid    bool           `json:"is_valid"`
+	LastHash   string         `json:"last_hash"`
+}
+
+type BlockResponse struct {
+	Index       uint64 `json:"index"`
+	Timestamp   int64  `json:"timestamp"`
+	DataHex     string `json:"data_hex"`
+	DataDecoded string `json:"data_decoded,omitempty"`
+	PrevHash    string `json:"prev_hash"`
+	Hash        string `json:"hash"`
+	Nonce       uint64 `json:"nonce"`
+	Difficulty  uint8  `json:"difficulty"`
+}
+
+type ChainInfo struct {
+	Length   int         `json:"length"`
+	IsValid  bool        `json:"is_valid"`
+	LastHash string      `json:"last_hash"`
+	Blocks   []BlockInfo `json:"blocks"`
+}
+
+type BlockInfo struct {
+	Index     uint64 `json:"index"`
+	Timestamp int64  `json:"timestamp"`
+	Hash      string `json:"hash"`
+	PrevHash  string `json:"prev_hash"`
+	Data      string `json:"data"`
+	Nonce     uint64 `json:"nonce"`
+}
+
 func main() {
 	config := parseFlags()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -74,6 +120,16 @@ func main() {
 	http.HandleFunc("/api/count-votes", server.handleCountVotes)
 	http.HandleFunc("/api/results", server.handleGetResults)
 	http.HandleFunc("/api/verify-count", server.handleVerifyCount)
+
+	// Admin
+	http.HandleFunc("/api/admin/credentials", server.handleGetAdminCredentials)
+
+	//Chain
+	http.HandleFunc("/api/blockchain/dkb", server.handleGetDKBChain)
+	http.HandleFunc("/api/blockchain/evb", server.handleGetEVBChain)
+	http.HandleFunc("/api/blockchain/block", server.handleGetBlock)
+	http.HandleFunc("/api/blockchain/validate", server.handleValidateChains)
+	http.HandleFunc("/api/blockchain/status", server.handleGetBlockchainStatus)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -143,6 +199,8 @@ func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Printf("Received vote request for voter: %s\n", req.VoterID)
+
 	// Convert private key string back to ECDSA private key
 	privateKey, err := service.ParsePrivateKey(req.PrivateKey)
 	if err != nil {
@@ -156,10 +214,14 @@ func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
 		ElectionID: "election-2024",
 	}
 
+	fmt.Printf("Processing vote for candidate: %s\n", req.Candidate)
+
 	if err := s.votingService.CastVote(req.VoterID, vote, privateKey); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	fmt.Println("Vote successfully cast and saved")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -167,6 +229,8 @@ func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
 
 // New endpoint to count votes
 func (s *Server) handleCountVotes(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Starting vote counting process")
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -185,12 +249,17 @@ func (s *Server) handleCountVotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Println("Counting votes with admin key")
+
 	// Count the votes using the getter
 	results, err := s.votingService.GetCountingService().CountVotes(privateKey)
 	if err != nil {
+		fmt.Printf("Error counting votes: %v\n", err)
 		http.Error(w, fmt.Sprintf("Failed to count votes: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	fmt.Printf("Vote counting complete. Total votes: %d\n", results.TotalVotes)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(results)
@@ -315,4 +384,201 @@ func initializeVotingService(config *Config) (*service.VotingService, error) {
 	}
 
 	return service.NewVotingService(absPath)
+}
+
+func (s *Server) handleGetAdminCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// This should only be called once during setup
+	creds, err := s.votingService.GetAdminCredentials()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get admin credentials: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(creds)
+}
+
+func (s *Server) handleGetDKBChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	blocks, err := s.votingService.GetDKBChain()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get DKB chain: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := BlockchainResponse{
+		ChainType:  "dkb",
+		BlockCount: len(blocks),
+		Blocks:     blocks,
+		IsValid:    models.ValidateChain(blocks),
+	}
+
+	if len(blocks) > 0 {
+		response.LastHash = hex.EncodeToString(blocks[len(blocks)-1].Hash)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleGetEVBChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	blocks, err := s.votingService.GetEVBChain()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get EVB chain: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := BlockchainResponse{
+		ChainType:  "evb",
+		BlockCount: len(blocks),
+		Blocks:     blocks,
+		IsValid:    models.ValidateChain(blocks),
+	}
+
+	if len(blocks) > 0 {
+		response.LastHash = hex.EncodeToString(blocks[len(blocks)-1].Hash)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleGetBlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chainType := r.URL.Query().Get("chain")
+	indexStr := r.URL.Query().Get("index")
+	if chainType == "" || indexStr == "" {
+		http.Error(w, "Missing chain type or block index", http.StatusBadRequest)
+		return
+	}
+
+	index, err := strconv.ParseUint(indexStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid block index", http.StatusBadRequest)
+		return
+	}
+
+	block, err := s.votingService.GetBlock(chainType, index)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get block: %v", err), http.StatusNotFound)
+		return
+	}
+
+	response := BlockResponse{
+		Index:      block.Index,
+		Timestamp:  block.Timestamp,
+		DataHex:    hex.EncodeToString(block.Data),
+		PrevHash:   hex.EncodeToString(block.PrevHash),
+		Hash:       hex.EncodeToString(block.Hash),
+		Nonce:      block.Nonce,
+		Difficulty: block.Difficulty,
+	}
+
+	// Try to decode the data if possible
+	var decodedData interface{}
+	if err := json.Unmarshal(block.Data, &decodedData); err == nil {
+		decodedJSON, _ := json.MarshalIndent(decodedData, "", "  ")
+		response.DataDecoded = string(decodedJSON)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleValidateChains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dkbValid, evbValid, err := s.votingService.ValidateChains()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to validate chains: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := struct {
+		DKBValid bool `json:"dkb_valid"`
+		EVBValid bool `json:"evb_valid"`
+	}{
+		DKBValid: dkbValid,
+		EVBValid: evbValid,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleGetBlockchainStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get DKB chain
+	dkbBlocks, err := s.votingService.GetDKBChain()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get DKB chain: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Get EVB chain
+	evbBlocks, err := s.votingService.GetEVBChain()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get EVB chain: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Convert blocks to response format
+	response := BlockchainStatusResponse{
+		DKBChain: convertToChainInfo(dkbBlocks, "dkb"),
+		EVBChain: convertToChainInfo(evbBlocks, "evb"),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func convertToChainInfo(blocks []*models.Block, chainType string) *ChainInfo {
+	info := &ChainInfo{
+		Length:  len(blocks),
+		IsValid: models.ValidateChain(blocks),
+		Blocks:  make([]BlockInfo, len(blocks)),
+	}
+
+	if len(blocks) > 0 {
+		lastBlock := blocks[len(blocks)-1]
+		info.LastHash = hex.EncodeToString(lastBlock.Hash)
+	}
+
+	for i, block := range blocks {
+		info.Blocks[i] = BlockInfo{
+			Index:     block.Index,
+			Timestamp: block.Timestamp,
+			Hash:      hex.EncodeToString(block.Hash),
+			PrevHash:  hex.EncodeToString(block.PrevHash),
+			Data:      string(block.Data),
+			Nonce:     block.Nonce,
+		}
+	}
+
+	return info
 }

@@ -18,9 +18,10 @@ type VoteCountingService struct {
 	results       map[string]int  // Store voting results
 }
 
-func NewVoteCountingService(cryptoService *encryption.CryptoService) *VoteCountingService {
+func NewVoteCountingService(cryptoService *encryption.CryptoService, store *storage.JSONStore) *VoteCountingService {
 	return &VoteCountingService{
 		cryptoService: cryptoService,
+		store:         store,
 		counted:       make(map[string]bool),
 		results:       make(map[string]int),
 	}

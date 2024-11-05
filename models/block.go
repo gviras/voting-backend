@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// Block represents a block in the blockchain
 type Block struct {
 	Index      uint64 `json:"index"`
 	Timestamp  int64  `json:"timestamp"`
@@ -15,10 +14,9 @@ type Block struct {
 	PrevHash   []byte `json:"prev_hash"`
 	Hash       []byte `json:"hash"`
 	Nonce      uint64 `json:"nonce"`
-	Difficulty uint8  `json:"difficulty"`
+	Difficulty uint8  `json:"difficulty"` // Number of leading zeros required
 }
 
-// NewBlock creates a new block and mines it
 func NewBlock(index uint64, data []byte, prevHash []byte, difficulty uint8) *Block {
 	block := &Block{
 		Index:      index,
@@ -28,25 +26,25 @@ func NewBlock(index uint64, data []byte, prevHash []byte, difficulty uint8) *Blo
 		Difficulty: difficulty,
 	}
 
-	//block.Mine()
-	block.Hash = block.calculateHash()
+	block.Mine() // Always perform mining
 	return block
 }
 
-// Mine performs proof of work to find a valid hash
 func (b *Block) Mine() {
-	prefix := make([]byte, b.Difficulty)
+	target := make([]byte, b.Difficulty)
 	var nonce uint64
 	for {
 		b.Nonce = nonce
 		b.Hash = b.calculateHash()
-		if bytes.HasPrefix(b.Hash, prefix) {
-			break
+
+		// Check if we have enough leading zeros
+		if bytes.HasPrefix(b.Hash, target) {
+			return
 		}
+
 		nonce++
-		// Add a check for every 1000 attempts to prevent blocking
 		if nonce%1000 == 0 {
-			time.Sleep(time.Microsecond) // Give other goroutines a chance to run
+			time.Sleep(time.Microsecond) // Prevent CPU hogging
 		}
 	}
 }
@@ -63,35 +61,54 @@ func (b *Block) calculateHash() []byte {
 	return hash[:]
 }
 
-// Validate checks if the block's hash is valid
 func (b *Block) Validate() bool {
-	prefix := make([]byte, b.Difficulty)
+	// Verify hash calculation
 	calculatedHash := b.calculateHash()
-	return bytes.Equal(calculatedHash, b.Hash) &&
-		bytes.HasPrefix(calculatedHash, prefix)
+	if !bytes.Equal(calculatedHash, b.Hash) {
+		return false
+	}
+
+	// Verify difficulty requirement
+	target := make([]byte, b.Difficulty)
+	return bytes.HasPrefix(calculatedHash, target)
 }
 
-// GetHash returns the block's hash
-func (b *Block) GetHash() []byte {
-	return b.Hash
-}
+// ValidateChain validates the entire blockchain
+func ValidateChain(blocks []*Block) bool {
+	if len(blocks) == 0 {
+		return true
+	}
 
-// GetPrevHash returns the previous block's hash
-func (b *Block) GetPrevHash() []byte {
-	return b.PrevHash
-}
+	// Validate genesis block
+	if !blocks[0].Validate() {
+		return false
+	}
 
-// GetTimestamp returns the block's timestamp
-func (b *Block) GetTimestamp() int64 {
-	return b.Timestamp
-}
+	// Validate each subsequent block
+	for i := 1; i < len(blocks); i++ {
+		currentBlock := blocks[i]
+		previousBlock := blocks[i-1]
 
-// GetIndex returns the block's index
-func (b *Block) GetIndex() uint64 {
-	return b.Index
-}
+		// Verify block hash
+		if !currentBlock.Validate() {
+			return false
+		}
 
-// GetData returns the block's data
-func (b *Block) GetData() []byte {
-	return b.Data
+		// Verify block links correctly to previous block
+		if !bytes.Equal(currentBlock.PrevHash, previousBlock.Hash) {
+			return false
+		}
+
+		// Verify block index
+		if currentBlock.Index != previousBlock.Index+1 {
+			return false
+		}
+
+		// Verify timestamp is after previous block
+		if currentBlock.Timestamp <= previousBlock.Timestamp {
+			return false
+		}
+	}
+
+	return true
 }

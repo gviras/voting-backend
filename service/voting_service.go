@@ -1,5 +1,6 @@
 package service
 
+
 import (
 	"crypto/ecdsa"
 	"encoding/hex"
@@ -7,17 +8,19 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
-	"math/big"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/google/uuid"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"voting-backend/encryption"
 	"voting-backend/models"
 	"voting-backend/storage"
-
-	"github.com/google/uuid"
 )
 
+// Types
 type VotingService struct {
 	store                *storage.JSONStore
 	cryptoService        *encryption.CryptoService
@@ -30,12 +33,88 @@ type VotingService struct {
 	voteBuffer           []models.Vote
 	registeredVoters     map[string]bool
 	votedVoters          map[string]bool
+	adminKey             *ecdsa.PrivateKey
+	storagePath          string
 }
 
+type AdminCredentials struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+}
+
+type VoterStatistics struct {
+	RegisteredCount int                    `json:"registered_count"`
+	VotedCount     int                    `json:"voted_count"`
+	VoterDetails   map[string]interface{} `json:"voter_details"`
+}
+
+type BlockchainResponse struct {
+	ChainType  string         `json:"chain_type"`
+	BlockCount int            `json:"block_count"`
+	Blocks     []*models.Block `json:"blocks"`
+	IsValid    bool           `json:"is_valid"`
+	LastHash   string         `json:"last_hash"`
+}
+
+func loadOrGenerateAdminKey(storagePath string) (*ecdsa.PrivateKey, error) {
+	adminKeyPath := filepath.Join(storagePath, "admin_credentials.json")
+
+	// Try to load existing admin credentials
+	if data, err := os.ReadFile(adminKeyPath); err == nil {
+		var creds AdminCredentials
+		if err := json.Unmarshal(data, &creds); err != nil {
+			return nil, fmt.Errorf("failed to parse admin credentials: %v", err)
+		}
+
+		// Remove "0x" prefix if present
+		privateKeyHex := strings.TrimPrefix(creds.PrivateKey, "0x")
+		privateKey, err := crypto.HexToECDSA(privateKeyHex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to restore admin private key: %v", err)
+		}
+
+		return privateKey, nil
+	}
+
+	// Generate new admin key if none exists
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate admin key: %v", err)
+	}
+
+	// Convert keys to hex strings for storage
+	privateKeyBytes := crypto.FromECDSA(privateKey)
+	publicKeyBytes := crypto.FromECDSAPub(&privateKey.PublicKey)
+
+	// Create and save credentials
+	creds := AdminCredentials{
+		PublicKey:  hexutil.Encode(publicKeyBytes),
+		PrivateKey: hexutil.Encode(privateKeyBytes),
+	}
+
+	data, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal admin credentials: %v", err)
+	}
+
+	if err := os.WriteFile(adminKeyPath, data, 0600); err != nil {
+		return nil, fmt.Errorf("failed to save admin credentials: %v", err)
+	}
+
+	return privateKey, nil
+}
+
+// Constructor
+// Constructor
 func NewVotingService(storagePath string) (*VotingService, error) {
 	store, err := storage.NewJSONStore(storagePath)
 	if err != nil {
 		return nil, err
+	}
+
+	adminKey, err := loadOrGenerateAdminKey(storagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup admin key: %v", err)
 	}
 
 	// Load existing chains
@@ -53,7 +132,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	cryptoService := encryption.NewCryptoService()
 	session := NewVotingSession(24 * time.Hour)
 	anonymizer := NewAnonymizationService(10, 30*time.Minute)
-	countingService := NewVoteCountingService(cryptoService)
+	countingService := NewVoteCountingService(cryptoService, store)
 
 	vs := &VotingService{
 		store:                store,
@@ -66,17 +145,19 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 		registeredVoters:     make(map[string]bool),
 		votedVoters:          make(map[string]bool),
 		voteBuffer:           make([]models.Vote, 0),
+		adminKey:             adminKey,
+		storagePath:          storagePath,
 	}
 
-	// Load registered voters from DKB
-	if err := vs.loadRegisteredVoters(); err != nil {
+	if err := vs.loadInitialVoters(); err != nil {
 		return nil, err
 	}
 
 	return vs, nil
 }
 
-func (vs *VotingService) loadRegisteredVoters() error {
+// Load initial voters from blockchain
+func (vs *VotingService) loadInitialVoters() error {
 	for _, block := range vs.dkbBlocks {
 		var registration models.VoterRegistration
 		if err := json.Unmarshal(block.Data, &registration); err != nil {
@@ -87,20 +168,11 @@ func (vs *VotingService) loadRegisteredVoters() error {
 	return nil
 }
 
-func (vs *VotingService) verifyVoter(voterID string) error {
-	if !vs.registeredVoters[voterID] {
-		return errors.New("voter not registered")
-	}
-	if vs.votedVoters[voterID] {
-		return errors.New("voter has already voted")
-	}
-	return nil
-}
 
+// Voter Registration Methods
 func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
-	fmt.Println("Lock received")
 
 	if !vs.votingSession.IsActive() {
 		return nil, errors.New("voting registration has ended")
@@ -109,28 +181,23 @@ func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error
 	if vs.registeredVoters[voterID] {
 		return nil, errors.New("voter already registered")
 	}
-	fmt.Println("Generating key pair")
+
 	privateKey, err := vs.cryptoService.GenerateKeyPair()
 	if err != nil {
 		return nil, err
 	}
 
-	fmt.Println("Saving voter registration")
 	registration := &models.VoterRegistration{
 		VoterID:   voterID,
 		PublicKey: vs.cryptoService.FromECDSAPub(&privateKey.PublicKey),
 		Timestamp: time.Now().Unix(),
 	}
 
-	if err := vs.store.SaveVoter(registration); err != nil {
-		return nil, err
-	}
-
 	registrationData, err := json.Marshal(registration)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("Creating block")
+
 	block := models.NewBlock(
 		uint64(len(vs.dkbBlocks)),
 		registrationData,
@@ -138,7 +205,6 @@ func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error
 		4,
 	)
 
-	fmt.Println("Saving block")
 	if err := vs.store.SaveBlock("dkb", block); err != nil {
 		return nil, err
 	}
@@ -146,10 +212,10 @@ func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error
 	vs.dkbBlocks = append(vs.dkbBlocks, block)
 	vs.registeredVoters[voterID] = true
 
-	fmt.Println("Voter %s registered\n", voterID)
 	return privateKey, nil
 }
 
+// Vote Casting Methods
 func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, privateKey *ecdsa.PrivateKey) error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -195,7 +261,7 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 
 	if len(vs.voteBuffer) >= vs.anonymizationService.batchSize {
 		if err := vs.processBatchedVotes(); err != nil {
-			return err
+			return fmt.Errorf("failed to process vote batch: %v", err)
 		}
 	}
 
@@ -203,7 +269,58 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 	return nil
 }
 
+// Blockchain Methods
+func (vs *VotingService) GetDKBChain() ([]*models.Block, error) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	return vs.dkbBlocks, nil
+}
+
+func (vs *VotingService) GetEVBChain() ([]*models.Block, error) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	return vs.evbBlocks, nil
+}
+
+func (vs *VotingService) GetBlock(chainType string, index uint64) (*models.Block, error) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
+	var blocks []*models.Block
+	switch chainType {
+	case "dkb":
+		blocks = vs.dkbBlocks
+	case "evb":
+		blocks = vs.evbBlocks
+	default:
+		return nil, fmt.Errorf("invalid chain type: %s", chainType)
+	}
+
+	for _, block := range blocks {
+		if block.Index == index {
+			return block, nil
+		}
+	}
+
+	return nil, fmt.Errorf("block not found")
+}
+
+func (vs *VotingService) ValidateChains() (bool, bool, error) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
+	dkbValid := models.ValidateChain(vs.dkbBlocks)
+	evbValid := models.ValidateChain(vs.evbBlocks)
+
+	return dkbValid, evbValid, nil
+}
+
+// Helper Methods
 func (vs *VotingService) processBatchedVotes() error {
+	if len(vs.voteBuffer) == 0 {
+		return nil
+	}
+
 	anonymizedVotes := vs.anonymizationService.AnonymizeVotes(vs.voteBuffer)
 
 	for _, av := range anonymizedVotes {
@@ -211,7 +328,7 @@ func (vs *VotingService) processBatchedVotes() error {
 
 		voteData, err := json.Marshal(cleanVote)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to marshal vote: %v", err)
 		}
 
 		block := models.NewBlock(
@@ -222,7 +339,7 @@ func (vs *VotingService) processBatchedVotes() error {
 		)
 
 		if err := vs.store.SaveBlock("evb", block); err != nil {
-			return err
+			return fmt.Errorf("failed to save vote block: %v", err)
 		}
 
 		vs.evbBlocks = append(vs.evbBlocks, block)
@@ -232,12 +349,20 @@ func (vs *VotingService) processBatchedVotes() error {
 	return nil
 }
 
+func (vs *VotingService) verifyVoter(voterID string) error {
+	if !vs.registeredVoters[voterID] {
+		return errors.New("voter not registered")
+	}
+	if vs.votedVoters[voterID] {
+		return errors.New("voter has already voted")
+	}
+	return nil
+}
+
 func (vs *VotingService) getLastDKBHash() []byte {
 	if len(vs.dkbBlocks) == 0 {
-		fmt.Println("Returning empty hash")
 		return make([]byte, 32)
 	}
-	fmt.Println("Returning hash")
 	return vs.dkbBlocks[len(vs.dkbBlocks)-1].Hash
 }
 
@@ -246,6 +371,51 @@ func (vs *VotingService) getLastEVBHash() []byte {
 		return make([]byte, 32)
 	}
 	return vs.evbBlocks[len(vs.evbBlocks)-1].Hash
+}
+
+// Admin Methods
+func (vs *VotingService) GetAdminCredentials() (*AdminCredentials, error) {
+	adminKeyPath := filepath.Join(vs.storagePath, "admin_credentials.json")
+	data, err := os.ReadFile(adminKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read admin credentials: %v", err)
+	}
+
+	var creds AdminCredentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return nil, fmt.Errorf("failed to parse admin credentials: %v", err)
+	}
+
+	return &creds, nil
+}
+
+func (vs *VotingService) GetAdminPublicKey() string {
+	return crypto.PubkeyToAddress(vs.adminKey.PublicKey).Hex()
+}
+
+// Status Methods
+func (vs *VotingService) GetVoterStatistics() *VoterStatistics {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
+	stats := &VoterStatistics{
+		RegisteredCount: len(vs.registeredVoters),
+		VotedCount:     len(vs.votedVoters),
+		VoterDetails:   make(map[string]interface{}),
+	}
+
+	for voterID := range vs.registeredVoters {
+		stats.VoterDetails[voterID] = map[string]interface{}{
+			"registered": true,
+			"voted":     vs.votedVoters[voterID],
+		}
+	}
+
+	return stats
+}
+
+func (vs *VotingService) IsVotingActive() bool {
+	return vs.votingSession.IsActive()
 }
 
 func (vs *VotingService) EndVotingSession() error {
@@ -260,36 +430,24 @@ func (vs *VotingService) EndVotingSession() error {
 
 	return nil
 }
-
-type VoterStatistics struct {
-	RegisteredCount int                    `json:"registered_count"`
-	VotedCount      int                    `json:"voted_count"`
-	VoterDetails    map[string]interface{} `json:"voter_details"`
+func (vs *VotingService) GetCountingService() *VoteCountingService {
+	return vs.countingService
 }
 
-func (vs *VotingService) GetVoterStatistics() *VoterStatistics {
+func (vs *VotingService) GetRegisteredVoters() map[string]bool {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 
-	stats := &VoterStatistics{
-		RegisteredCount: len(vs.registeredVoters),
-		VotedCount:      len(vs.votedVoters),
-		VoterDetails:    make(map[string]interface{}),
+	voters := make(map[string]bool)
+	for k, v := range vs.registeredVoters {
+		voters[k] = v
 	}
-
-	// Add details for each voter
-	for voterID := range vs.registeredVoters {
-		stats.VoterDetails[voterID] = map[string]interface{}{
-			"registered": true,
-			"voted":      vs.votedVoters[voterID],
-		}
-	}
-
-	return stats
+	return voters
 }
 
+// ParsePrivateKey helper function
 func ParsePrivateKey(keyStr string) (*ecdsa.PrivateKey, error) {
-	// Remove any "0x" prefix if present
+	// Remove "0x" prefix if present
 	keyStr = strings.TrimPrefix(keyStr, "0x")
 
 	// Decode the hex string to bytes
@@ -298,77 +456,10 @@ func ParsePrivateKey(keyStr string) (*ecdsa.PrivateKey, error) {
 		return nil, fmt.Errorf("failed to decode private key hex string: %w", err)
 	}
 
-	// Create private key struct
-	privateKey := new(ecdsa.PrivateKey)
-	// Using the same curve as in GenerateKeyPair (secp256k1)
-	privateKey.Curve = crypto.S256()
-
-	// Set the private key value
-	privateKey.D = new(big.Int).SetBytes(keyBytes)
-
-	// Calculate the public key
-	privateKey.PublicKey.X, privateKey.PublicKey.Y = privateKey.Curve.ScalarBaseMult(keyBytes)
+	privateKey, err := crypto.ToECDSA(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
 
 	return privateKey, nil
-}
-
-func (vs *VotingService) getVoterDetails() map[string]interface{} {
-	// Already under mutex lock from GetVoterStatistics
-	details := make(map[string]interface{})
-
-	for voterID := range vs.registeredVoters {
-		// Get registration from blockchain
-		registration, err := vs.getVoterRegistration(voterID)
-		if err != nil {
-			continue // Skip if we can't find registration details
-		}
-
-		details[voterID] = map[string]interface{}{
-			"registered":      true,
-			"voted":           vs.votedVoters[voterID],
-			"timestamp":       registration.Timestamp,
-			"public_key_hash": vs.cryptoService.Keccak256(registration.PublicKey),
-		}
-	}
-
-	return details
-}
-
-func (vs *VotingService) GetCountingService() *VoteCountingService {
-	return vs.countingService
-}
-
-func (vs *VotingService) getVoterRegistration(voterID string) (*models.VoterRegistration, error) {
-	for _, block := range vs.dkbBlocks {
-		var registration models.VoterRegistration
-		if err := json.Unmarshal(block.Data, &registration); err != nil {
-			continue
-		}
-		if registration.VoterID == voterID {
-			return &registration, nil
-		}
-	}
-	return nil, errors.New("voter registration not found")
-}
-
-func (vs *VotingService) GetRegisteredVoters() map[string]bool {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
-	// Return a copy of the map
-	voters := make(map[string]bool)
-	for k, v := range vs.registeredVoters {
-		voters[k] = v
-	}
-	return voters
-}
-
-type VoterStats struct {
-	RegisteredCount int
-	VotedCount      int
-	VoterDetails    map[string]interface{}
-}
-
-func (vs *VotingService) IsVotingActive() bool {
-	return vs.votingSession.IsActive()
 }
