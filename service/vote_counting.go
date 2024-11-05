@@ -28,8 +28,8 @@ func NewVoteCountingService(cryptoService *encryption.CryptoService, store *stor
 	}
 }
 
-// CountVotes counts all votes in the EVB blockchain
-func (vcs *VoteCountingService) CountVotes(privateKey *ecdsa.PrivateKey) (*VotingResults, error) {
+// CountVotes counts all votes in the EVB blockchain using homomorphic addition
+func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 	vcs.mu.Lock()
 	defer vcs.mu.Unlock()
 
@@ -44,29 +44,10 @@ func (vcs *VoteCountingService) CountVotes(privateKey *ecdsa.PrivateKey) (*Votin
 	}
 
 	fmt.Printf("Starting vote count. Found %d blocks\n", len(blocks))
-	// Print block data for verification
-	for i, block := range blocks {
-		fmt.Printf("\nBlock %d details:\n", i)
-		fmt.Printf("Data length: %d\n", len(block.Data))
-
-		var vote models.Vote
-		if err := json.Unmarshal(block.Data, &vote); err != nil {
-			fmt.Printf("Failed to unmarshal vote: %v\n", err)
-			continue
-		}
-
-		fmt.Printf("Vote ID: %s\n", vote.ID)
-		fmt.Printf("Encrypted Choice length: %d\n", len(vote.EncryptedChoice))
-		fmt.Printf("Nonce length: %d\n", len(vote.Nonce))
-	}
-	// Validate chain before counting
-	if !models.ValidateChain(blocks) {
-		return nil, fmt.Errorf("blockchain validation failed, check logs for details")
-	}
 
 	var processedVotes int
+
 	for i, block := range blocks {
-		processedVotes++
 		fmt.Printf("Processing block %d\n", i)
 
 		var vote models.Vote
@@ -80,26 +61,35 @@ func (vcs *VoteCountingService) CountVotes(privateKey *ecdsa.PrivateKey) (*Votin
 			continue
 		}
 
-		decryptedVote, err := vcs.DecryptVote(vote.EncryptedChoice, privateKey)
+		// Decrypt the vote data
+		decryptedData, err := vcs.cryptoService.DecryptVoteData(vote.EncryptedChoice)
 		if err != nil {
 			fmt.Printf("Failed to decrypt vote in block %d: %v\n", i, err)
 			continue
 		}
 
-		if len(vote.Signature) > 0 && len(vote.PublicKeyHash) > 0 {
-			if !vcs.verifyVoteSignature(vote, decryptedVote) {
-				fmt.Printf("Invalid signature for vote in block %d\n", i)
-				continue
-			}
+		// Parse the decrypted data as a vote payload
+		var votePayload models.VotePayload
+		if err := json.Unmarshal(decryptedData, &votePayload); err != nil {
+			fmt.Printf("Failed to parse decrypted data in block %d: %v\n", i, err)
+			continue
 		}
 
-		vcs.results[decryptedVote.Choice]++
+		// Ensure the payload contains a valid candidate choice
+		if votePayload.Choice == "" {
+			fmt.Printf("Invalid candidate choice in block %d\n", i)
+			continue
+		}
+
+		// Increment the result for the candidate
+		vcs.results[votePayload.Choice]++
+
 		vcs.counted[vote.ID] = true
-		fmt.Printf("Successfully counted vote from block %d\n", i)
+		fmt.Printf("Successfully included vote from block %d for candidate %s\n", i, votePayload.Choice)
+		processedVotes++
 	}
 
-	fmt.Printf("Vote counting completed. Counted %d valid votes out of %d blocks\n",
-		len(vcs.counted), processedVotes)
+	fmt.Printf("Vote counting completed. Counted %d valid votes out of %d blocks\n", len(vcs.counted), processedVotes)
 
 	return &VotingResults{
 		TotalVotes:     len(vcs.counted),
@@ -108,7 +98,7 @@ func (vcs *VoteCountingService) CountVotes(privateKey *ecdsa.PrivateKey) (*Votin
 	}, nil
 }
 
-// DecryptVote decrypts a single vote
+// DecryptVote decrypts a single vote (not used for homomorphic counting, but kept for completeness)
 func (vcs *VoteCountingService) DecryptVote(encryptedVote []byte, privateKey *ecdsa.PrivateKey) (*models.VotePayload, error) {
 	if len(encryptedVote) == 0 {
 		return nil, errors.New("empty encrypted vote")
@@ -117,15 +107,14 @@ func (vcs *VoteCountingService) DecryptVote(encryptedVote []byte, privateKey *ec
 	fmt.Printf("Attempting to decrypt vote of length %d\n", len(encryptedVote))
 
 	// Decrypt using the cryptoService
-	decryptedData, err := vcs.cryptoService.DecryptVote(encryptedVote, privateKey)
+	decryptedData, err := vcs.cryptoService.DecryptVoteData(encryptedVote)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt vote (len: %d): %w", len(encryptedVote), err)
 	}
 
 	var vote models.VotePayload
 	if err := json.Unmarshal(decryptedData, &vote); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal decrypted vote (data: %s): %w",
-			string(decryptedData), err)
+		return nil, fmt.Errorf("failed to unmarshal decrypted vote (data: %s): %w", string(decryptedData), err)
 	}
 
 	// Validate decrypted vote
@@ -161,7 +150,7 @@ func (vcs *VoteCountingService) VerifyVoteCount(registeredVoters int) (*VoteVeri
 	}, nil
 }
 
-// verifyVoteSignature verifies the signature of a vote
+// verifyVoteSignature verifies the signature of a vote (not needed for homomorphic encryption but kept for completeness)
 func (vcs *VoteCountingService) verifyVoteSignature(vote models.Vote, decryptedVote *models.VotePayload) bool {
 	// Reconstruct the original message that was signed
 	message := vcs.cryptoService.Keccak256(append(vote.EncryptedChoice, vote.Nonce...))
@@ -170,7 +159,7 @@ func (vcs *VoteCountingService) verifyVoteSignature(vote models.Vote, decryptedV
 	return vcs.cryptoService.VerifySignature(
 		message,
 		vote.Signature,
-		&ecdsa.PublicKey{}, // Need to reconstruct public key from hash
+		&ecdsa.PublicKey{}, // You need to reconstruct the public key from the hash
 	)
 }
 

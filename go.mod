@@ -12,5 +12,6 @@ require (
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/holiman/uint256 v1.3.1 // indirect
+	github.com/roasbeef/go-go-gadget-paillier v0.0.0-20181009074315-14f1f86b6000 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 )

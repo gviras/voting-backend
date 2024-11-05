@@ -4,11 +4,14 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="b7d9957c-6420-4ab0-ae8e-a916fd348c7a" name="Changes" comment="">
+    <list default="true" id="b7d9957c-6420-4ab0-ae8e-a916fd348c7a" name="Changes" comment="Almost works">
       <change beforePath="$PROJECT_DIR$/.idea/voting-backend.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/voting-backend.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/encryption/service.go" beforeDir="false" afterPath="$PROJECT_DIR$/encryption/service.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/go.mod" beforeDir="false" afterPath="$PROJECT_DIR$/go.mod" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/go.sum" beforeDir="false" afterPath="$PROJECT_DIR$/go.sum" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.go" beforeDir="false" afterPath="$PROJECT_DIR$/main.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/models/block.go" beforeDir="false" afterPath="$PROJECT_DIR$/models/block.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/models/vote.go" beforeDir="false" afterPath="$PROJECT_DIR$/models/vote.go" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/service/vote_counting.go" beforeDir="false" afterPath="$PROJECT_DIR$/service/vote_counting.go" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/service/voting_service.go" beforeDir="false" afterPath="$PROJECT_DIR$/service/voting_service.go" afterDir="false" />
     </list>
@@ -74,6 +77,21 @@
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
   </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="Almost works" />
+    <option name="LAST_COMMIT_MESSAGE" value="Almost works" />
+  </component>
   <component name="VgoProject">
     <settings-migrated>true</settings-migrated>
   </component>
@@ -84,6 +102,21 @@
           <url>file://$PROJECT_DIR$/main.go</url>
           <line>150</line>
           <option name="timeStamp" value="1" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
+          <url>file://$PROJECT_DIR$/encryption/service.go</url>
+          <line>32</line>
+          <option name="timeStamp" value="2" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" log-message="true" suspend="NONE" type="DlvLineBreakpoint">
+          <url>file://$PROJECT_DIR$/service/vote_counting.go</url>
+          <line>31</line>
+          <option name="timeStamp" value="3" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
+          <url>file://$PROJECT_DIR$/service/voting_service.go</url>
+          <line>233</line>
+          <option name="timeStamp" value="5" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>

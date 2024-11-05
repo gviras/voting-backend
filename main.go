@@ -241,24 +241,16 @@ func (s *Server) handleCountVotes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	// Parse the private key
-	privateKey, err := service.ParsePrivateKey(req.PrivateKey)
-	if err != nil {
-		http.Error(w, "Invalid private key", http.StatusBadRequest)
-		return
-	}
-
 	fmt.Println("Counting votes with admin key")
 
-	err = s.votingService.FlushVoteBuffer()
+	err := s.votingService.FlushVoteBuffer()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to flush vote buffer: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Count the votes using the getter
-	results, err := s.votingService.GetCountingService().CountVotes(privateKey)
+	results, err := s.votingService.GetCountingService().CountVotes()
 	if err != nil {
 		fmt.Printf("Error counting votes: %v\n", err)
 		http.Error(w, fmt.Sprintf("Failed to count votes: %v", err), http.StatusInternalServerError)

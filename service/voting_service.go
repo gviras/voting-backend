@@ -128,7 +128,12 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	}
 
 	// Initialize services
-	cryptoService := encryption.NewCryptoService()
+	cryptoService, err := encryption.NewCryptoService()
+	if err != nil {
+		//log
+		return nil, err
+	}
+
 	session := NewVotingSession(24 * time.Hour)
 	anonymizer := NewAnonymizationService(1, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store)
@@ -226,17 +231,13 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 		return err
 	}
 
-	voteData, err := json.Marshal(vote)
+	encryptedVote, err := vs.cryptoService.EncryptVoteData(*vote)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to encrypt vote data: %v", err)
 	}
 
+	// Create a new vote record
 	nonce, err := vs.cryptoService.GenerateNonce()
-	if err != nil {
-		return err
-	}
-
-	encryptedVote, err := vs.cryptoService.EncryptVote(voteData, &privateKey.PublicKey)
 	if err != nil {
 		return err
 	}
@@ -255,12 +256,13 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 	}
 	voteRecord.Signature = signature
 
-	// Add vote to buffer
+	// Add the vote record to the buffer
 	vs.voteBuffer = append(vs.voteBuffer, *voteRecord)
+	vs.votedVoters[voterID] = true
 
 	fmt.Printf("Vote buffer size: %d, Batch size: %d\n", len(vs.voteBuffer), vs.anonymizationService.batchSize)
 
-	// Process votes if we have enough for a batch
+	// Process votes if the buffer size meets the batch requirement
 	if len(vs.voteBuffer) >= vs.anonymizationService.batchSize {
 		fmt.Println("Processing vote batch...")
 		if err := vs.processBatchedVotes(); err != nil {
@@ -269,7 +271,6 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 		fmt.Println("Vote batch processed successfully")
 	}
 
-	vs.votedVoters[voterID] = true
 	return nil
 }
 
