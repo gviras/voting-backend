@@ -11,11 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 	"voting-backend/models"
 	"voting-backend/service"
-	"strconv"
 )
 
 type Config struct {
@@ -62,11 +62,11 @@ type BlockchainStatusResponse struct {
 }
 
 type BlockchainResponse struct {
-	ChainType  string         `json:"chain_type"`
-	BlockCount int            `json:"block_count"`
+	ChainType  string          `json:"chain_type"`
+	BlockCount int             `json:"block_count"`
 	Blocks     []*models.Block `json:"blocks"`
-	IsValid    bool           `json:"is_valid"`
-	LastHash   string         `json:"last_hash"`
+	IsValid    bool            `json:"is_valid"`
+	LastHash   string          `json:"last_hash"`
 }
 
 type BlockResponse struct {
@@ -250,6 +250,12 @@ func (s *Server) handleCountVotes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Println("Counting votes with admin key")
+
+	err = s.votingService.FlushVoteBuffer()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to flush vote buffer: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	// Count the votes using the getter
 	results, err := s.votingService.GetCountingService().CountVotes(privateKey)

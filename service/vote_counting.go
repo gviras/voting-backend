@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"voting-backend/encryption"
 	"voting-backend/models"
@@ -27,7 +28,7 @@ func NewVoteCountingService(cryptoService *encryption.CryptoService, store *stor
 	}
 }
 
-// CountVotes counts all votes in the EVB
+// CountVotes counts all votes in the EVB blockchain
 func (vcs *VoteCountingService) CountVotes(privateKey *ecdsa.PrivateKey) (*VotingResults, error) {
 	vcs.mu.Lock()
 	defer vcs.mu.Unlock()
@@ -36,44 +37,74 @@ func (vcs *VoteCountingService) CountVotes(privateKey *ecdsa.PrivateKey) (*Votin
 	vcs.counted = make(map[string]bool)
 	vcs.results = make(map[string]int)
 
-	// Load all votes from EVB
-	votes, err := vcs.store.LoadChain("evb")
+	// Load EVB chain
+	blocks, err := vcs.store.LoadChain("evb")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
 	}
 
-	for _, block := range votes {
+	fmt.Printf("Starting vote count. Found %d blocks\n", len(blocks))
+	// Print block data for verification
+	for i, block := range blocks {
+		fmt.Printf("\nBlock %d details:\n", i)
+		fmt.Printf("Data length: %d\n", len(block.Data))
+
 		var vote models.Vote
 		if err := json.Unmarshal(block.Data, &vote); err != nil {
-			continue // Skip invalid votes
+			fmt.Printf("Failed to unmarshal vote: %v\n", err)
+			continue
 		}
 
-		// Prevent double counting
+		fmt.Printf("Vote ID: %s\n", vote.ID)
+		fmt.Printf("Encrypted Choice length: %d\n", len(vote.EncryptedChoice))
+		fmt.Printf("Nonce length: %d\n", len(vote.Nonce))
+	}
+	// Validate chain before counting
+	if !models.ValidateChain(blocks) {
+		return nil, fmt.Errorf("blockchain validation failed, check logs for details")
+	}
+
+	var processedVotes int
+	for i, block := range blocks {
+		processedVotes++
+		fmt.Printf("Processing block %d\n", i)
+
+		var vote models.Vote
+		if err := json.Unmarshal(block.Data, &vote); err != nil {
+			fmt.Printf("Failed to unmarshal vote in block %d: %v\n", i, err)
+			continue
+		}
+
 		if vcs.counted[vote.ID] {
+			fmt.Printf("Skipping duplicate vote ID in block %d\n", i)
 			continue
 		}
 
 		decryptedVote, err := vcs.DecryptVote(vote.EncryptedChoice, privateKey)
 		if err != nil {
-			continue // Skip votes that can't be decrypted
+			fmt.Printf("Failed to decrypt vote in block %d: %v\n", i, err)
+			continue
 		}
 
-		// Verify vote signature if present
 		if len(vote.Signature) > 0 && len(vote.PublicKeyHash) > 0 {
 			if !vcs.verifyVoteSignature(vote, decryptedVote) {
-				continue // Skip votes with invalid signatures
+				fmt.Printf("Invalid signature for vote in block %d\n", i)
+				continue
 			}
 		}
 
-		// Count the vote
 		vcs.results[decryptedVote.Choice]++
 		vcs.counted[vote.ID] = true
+		fmt.Printf("Successfully counted vote from block %d\n", i)
 	}
+
+	fmt.Printf("Vote counting completed. Counted %d valid votes out of %d blocks\n",
+		len(vcs.counted), processedVotes)
 
 	return &VotingResults{
 		TotalVotes:     len(vcs.counted),
 		Results:        vcs.results,
-		ProcessedVotes: len(votes),
+		ProcessedVotes: processedVotes,
 	}, nil
 }
 
@@ -83,17 +114,29 @@ func (vcs *VoteCountingService) DecryptVote(encryptedVote []byte, privateKey *ec
 		return nil, errors.New("empty encrypted vote")
 	}
 
+	fmt.Printf("Attempting to decrypt vote of length %d\n", len(encryptedVote))
+
 	// Decrypt using the cryptoService
 	decryptedData, err := vcs.cryptoService.DecryptVote(encryptedVote, privateKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decrypt vote (len: %d): %w", len(encryptedVote), err)
 	}
 
 	var vote models.VotePayload
 	if err := json.Unmarshal(decryptedData, &vote); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal decrypted vote (data: %s): %w",
+			string(decryptedData), err)
 	}
 
+	// Validate decrypted vote
+	if vote.Choice == "" {
+		return nil, fmt.Errorf("decrypted vote has empty choice")
+	}
+	if vote.VoterID == "" {
+		return nil, fmt.Errorf("decrypted vote has empty voter ID")
+	}
+
+	fmt.Printf("Successfully decrypted vote for voter %s\n", vote.VoterID)
 	return &vote, nil
 }
 
@@ -102,16 +145,19 @@ func (vcs *VoteCountingService) VerifyVoteCount(registeredVoters int) (*VoteVeri
 	vcs.mu.RLock()
 	defer vcs.mu.RUnlock()
 
-	votes, err := vcs.store.LoadChain("evb")
+	blocks, err := vcs.store.LoadChain("evb")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
 	}
+
+	// Validate chain
+	isValid := models.ValidateChain(blocks)
 
 	return &VoteVerification{
 		RegisteredVoters: registeredVoters,
-		ActualVotes:      len(votes),
+		ActualVotes:      len(blocks),
 		CountedVotes:     len(vcs.counted),
-		IsValid:          len(votes) <= registeredVoters && len(votes) == len(vcs.counted),
+		IsValid:          isValid && len(blocks) <= registeredVoters && len(blocks) == len(vcs.counted),
 	}, nil
 }
 
@@ -120,11 +166,29 @@ func (vcs *VoteCountingService) verifyVoteSignature(vote models.Vote, decryptedV
 	// Reconstruct the original message that was signed
 	message := vcs.cryptoService.Keccak256(append(vote.EncryptedChoice, vote.Nonce...))
 
+	// Verify the signature
 	return vcs.cryptoService.VerifySignature(
 		message,
 		vote.Signature,
 		&ecdsa.PublicKey{}, // Need to reconstruct public key from hash
 	)
+}
+
+// GetLatestResults returns the current vote count without recounting
+func (vcs *VoteCountingService) GetLatestResults() (*VotingResults, error) {
+	vcs.mu.RLock()
+	defer vcs.mu.RUnlock()
+
+	blocks, err := vcs.store.LoadChain("evb")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
+	}
+
+	return &VotingResults{
+		TotalVotes:     len(vcs.counted),
+		Results:        vcs.results,
+		ProcessedVotes: len(blocks),
+	}, nil
 }
 
 // VotingResults represents the final vote count
@@ -140,15 +204,4 @@ type VoteVerification struct {
 	ActualVotes      int  `json:"actual_votes"`
 	CountedVotes     int  `json:"counted_votes"`
 	IsValid          bool `json:"is_valid"`
-}
-
-func (vcs *VoteCountingService) GetLatestResults() (*VotingResults, error) {
-	vcs.mu.RLock()
-	defer vcs.mu.RUnlock()
-
-	return &VotingResults{
-		TotalVotes:     len(vcs.counted),
-		Results:        vcs.results,
-		ProcessedVotes: len(vcs.counted),
-	}, nil
 }

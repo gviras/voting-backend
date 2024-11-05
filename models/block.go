@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"time"
 )
 
@@ -76,11 +77,14 @@ func (b *Block) Validate() bool {
 // ValidateChain validates the entire blockchain
 func ValidateChain(blocks []*Block) bool {
 	if len(blocks) == 0 {
+		fmt.Println("Chain validation: Empty chain is valid")
 		return true
 	}
 
 	// Validate genesis block
 	if !blocks[0].Validate() {
+		fmt.Printf("Chain validation: Genesis block invalid\nHash: %x\nCalculated Hash: %x\n",
+			blocks[0].Hash, blocks[0].calculateHash())
 		return false
 	}
 
@@ -91,21 +95,25 @@ func ValidateChain(blocks []*Block) bool {
 
 		// Verify block hash
 		if !currentBlock.Validate() {
+			fmt.Printf("Chain validation: Block %d has invalid hash\n", i)
 			return false
 		}
 
 		// Verify block links correctly to previous block
 		if !bytes.Equal(currentBlock.PrevHash, previousBlock.Hash) {
+			fmt.Printf("Chain validation: Block %d has invalid previous hash link\n", i)
 			return false
 		}
 
 		// Verify block index
 		if currentBlock.Index != previousBlock.Index+1 {
+			fmt.Printf("Chain validation: Block %d has invalid index\n", i)
 			return false
 		}
 
-		// Verify timestamp is after previous block
+		// Verify timestamp is after previous block but within reasonable range
 		if currentBlock.Timestamp <= previousBlock.Timestamp {
+			fmt.Printf("Chain validation: Block %d has invalid timestamp\n", i)
 			return false
 		}
 	}

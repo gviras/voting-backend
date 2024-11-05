@@ -1,14 +1,13 @@
 package service
 
-
 import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"os"
 	"path/filepath"
@@ -44,16 +43,16 @@ type AdminCredentials struct {
 
 type VoterStatistics struct {
 	RegisteredCount int                    `json:"registered_count"`
-	VotedCount     int                    `json:"voted_count"`
-	VoterDetails   map[string]interface{} `json:"voter_details"`
+	VotedCount      int                    `json:"voted_count"`
+	VoterDetails    map[string]interface{} `json:"voter_details"`
 }
 
 type BlockchainResponse struct {
-	ChainType  string         `json:"chain_type"`
-	BlockCount int            `json:"block_count"`
+	ChainType  string          `json:"chain_type"`
+	BlockCount int             `json:"block_count"`
 	Blocks     []*models.Block `json:"blocks"`
-	IsValid    bool           `json:"is_valid"`
-	LastHash   string         `json:"last_hash"`
+	IsValid    bool            `json:"is_valid"`
+	LastHash   string          `json:"last_hash"`
 }
 
 func loadOrGenerateAdminKey(storagePath string) (*ecdsa.PrivateKey, error) {
@@ -131,7 +130,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	// Initialize services
 	cryptoService := encryption.NewCryptoService()
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(10, 30*time.Minute)
+	anonymizer := NewAnonymizationService(1, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store)
 
 	vs := &VotingService{
@@ -168,7 +167,6 @@ func (vs *VotingService) loadInitialVoters() error {
 	return nil
 }
 
-
 // Voter Registration Methods
 func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error) {
 	vs.mu.Lock()
@@ -202,7 +200,7 @@ func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error
 		uint64(len(vs.dkbBlocks)),
 		registrationData,
 		vs.getLastDKBHash(),
-		4,
+		1,
 	)
 
 	if err := vs.store.SaveBlock("dkb", block); err != nil {
@@ -257,12 +255,18 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 	}
 	voteRecord.Signature = signature
 
+	// Add vote to buffer
 	vs.voteBuffer = append(vs.voteBuffer, *voteRecord)
 
+	fmt.Printf("Vote buffer size: %d, Batch size: %d\n", len(vs.voteBuffer), vs.anonymizationService.batchSize)
+
+	// Process votes if we have enough for a batch
 	if len(vs.voteBuffer) >= vs.anonymizationService.batchSize {
+		fmt.Println("Processing vote batch...")
 		if err := vs.processBatchedVotes(); err != nil {
 			return fmt.Errorf("failed to process vote batch: %v", err)
 		}
+		fmt.Println("Vote batch processed successfully")
 	}
 
 	vs.votedVoters[voterID] = true
@@ -321,7 +325,18 @@ func (vs *VotingService) processBatchedVotes() error {
 		return nil
 	}
 
-	anonymizedVotes := vs.anonymizationService.AnonymizeVotes(vs.voteBuffer)
+	fmt.Printf("Processing %d votes\n", len(vs.voteBuffer))
+
+	currentBatch := make([]models.Vote, len(vs.voteBuffer))
+	copy(currentBatch, vs.voteBuffer)
+	vs.voteBuffer = make([]models.Vote, 0)
+
+	anonymizedVotes := vs.anonymizationService.AnonymizeVotes(currentBatch)
+
+	lastTimestamp := int64(0)
+	if len(vs.evbBlocks) > 0 {
+		lastTimestamp = vs.evbBlocks[len(vs.evbBlocks)-1].Timestamp
+	}
 
 	for _, av := range anonymizedVotes {
 		cleanVote := vs.anonymizationService.RemoveVoterSignatures(av)
@@ -331,21 +346,47 @@ func (vs *VotingService) processBatchedVotes() error {
 			return fmt.Errorf("failed to marshal vote: %v", err)
 		}
 
-		block := models.NewBlock(
-			uint64(len(vs.evbBlocks)),
-			voteData,
-			vs.getLastEVBHash(),
-			4,
-		)
+		// Ensure unique timestamp
+		lastTimestamp = ensureUniqueTimestamp(lastTimestamp)
+
+		block := &models.Block{
+			Index:      uint64(len(vs.evbBlocks)),
+			Timestamp:  lastTimestamp,
+			Data:       voteData,
+			PrevHash:   vs.getLastEVBHash(),
+			Difficulty: 1,
+		}
+
+		block.Mine()
 
 		if err := vs.store.SaveBlock("evb", block); err != nil {
 			return fmt.Errorf("failed to save vote block: %v", err)
 		}
 
 		vs.evbBlocks = append(vs.evbBlocks, block)
+		fmt.Printf("Added block %d to EVB chain with timestamp %d\n",
+			block.Index, block.Timestamp)
 	}
 
-	vs.voteBuffer = nil
+	fmt.Println("Batch processing completed")
+	return nil
+}
+
+func ensureUniqueTimestamp(lastTimestamp int64) int64 {
+	currentTime := time.Now().Unix()
+	if currentTime <= lastTimestamp {
+		return lastTimestamp + 1
+	}
+	return currentTime
+}
+
+func (vs *VotingService) FlushVoteBuffer() error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	if len(vs.voteBuffer) > 0 {
+		return vs.processBatchedVotes()
+	}
 	return nil
 }
 
@@ -400,14 +441,14 @@ func (vs *VotingService) GetVoterStatistics() *VoterStatistics {
 
 	stats := &VoterStatistics{
 		RegisteredCount: len(vs.registeredVoters),
-		VotedCount:     len(vs.votedVoters),
-		VoterDetails:   make(map[string]interface{}),
+		VotedCount:      len(vs.votedVoters),
+		VoterDetails:    make(map[string]interface{}),
 	}
 
 	for voterID := range vs.registeredVoters {
 		stats.VoterDetails[voterID] = map[string]interface{}{
 			"registered": true,
-			"voted":     vs.votedVoters[voterID],
+			"voted":      vs.votedVoters[voterID],
 		}
 	}
 

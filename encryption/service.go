@@ -5,7 +5,8 @@ import (
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/rand"
-	"errors"
+	"encoding/binary"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/crypto/sha3"
@@ -27,38 +28,6 @@ func (cs *CryptoService) GenerateNonce() ([]byte, error) {
 	nonce := make([]byte, 32)
 	_, err := rand.Read(nonce)
 	return nonce, err
-}
-
-// EncryptVote encrypts a vote using public key
-func (cs *CryptoService) EncryptVote(vote []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
-	ephemKey, err := crypto.GenerateKey()
-	if err != nil {
-		return nil, err
-	}
-
-	sharedSecret := cs.Keccak256(
-		ephemKey.PublicKey.X.Bytes(),
-		ephemKey.PublicKey.Y.Bytes(),
-		publicKey.X.Bytes(),
-		publicKey.Y.Bytes(),
-	)
-
-	block, err := aes.NewCipher(sharedSecret)
-	if err != nil {
-		return nil, err
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = rand.Read(nonce); err != nil {
-		return nil, err
-	}
-
-	return gcm.Seal(nonce, nonce, vote, nil), nil
 }
 
 // Sign creates a digital signature of data using private key
@@ -100,17 +69,67 @@ func (cs *CryptoService) Keccak256(data ...[]byte) []byte {
 }
 
 // DecryptVote decrypts an encrypted vote using private key
-func (cs *CryptoService) DecryptVote(encryptedVote []byte, privateKey *ecdsa.PrivateKey) ([]byte, error) {
-	if len(encryptedVote) < 24 { // Minimum length for nonce + data
-		return nil, errors.New("encrypted vote too short")
+// EncryptVote encrypts a vote using public key
+func (cs *CryptoService) EncryptVote(vote []byte, publicKey *ecdsa.PublicKey) ([]byte, error) {
+	// Generate ephemeral key pair for this encryption
+	ephemKey, err := crypto.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate ephemeral key: %v", err)
 	}
 
-	sharedSecret := cs.Keccak256(
-		privateKey.PublicKey.X.Bytes(),
-		privateKey.PublicKey.Y.Bytes(),
-	)
+	// Generate shared secret using ECDH
+	sharedX, _ := publicKey.Curve.ScalarMult(publicKey.X, publicKey.Y, ephemKey.D.Bytes())
+	sharedSecret := cs.Keccak256(sharedX.Bytes())
 
-	block, err := aes.NewCipher(sharedSecret)
+	// Create cipher
+	block, err := aes.NewCipher(sharedSecret[:32])
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return nil, err
+	}
+
+	// Include ephemeral public key in output
+	ephemPubBytes := crypto.FromECDSAPub(&ephemKey.PublicKey)
+
+	// Encrypt the data
+	ciphertext := gcm.Seal(nil, nonce, vote, nil)
+
+	// Combine all parts
+	result := make([]byte, 2+len(ephemPubBytes)+len(nonce)+len(ciphertext))
+	binary.BigEndian.PutUint16(result[0:2], uint16(len(ephemPubBytes)))
+	copy(result[2:], ephemPubBytes)
+	copy(result[2+len(ephemPubBytes):], nonce)
+	copy(result[2+len(ephemPubBytes)+len(nonce):], ciphertext)
+
+	return result, nil
+}
+
+// DecryptVote decrypts an encrypted vote using private key
+func (cs *CryptoService) DecryptVote(encryptedVote []byte, privateKey *ecdsa.PrivateKey) ([]byte, error) {
+	// Extract ephemeral public key length
+	ephemPubLen := binary.BigEndian.Uint16(encryptedVote[0:2])
+
+	// Get ephemeral public key
+	ephemPubBytes := encryptedVote[2 : 2+ephemPubLen]
+	ephemPub, err := crypto.UnmarshalPubkey(ephemPubBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ephemeral public key: %v", err)
+	}
+
+	// Generate shared secret using ECDH
+	sharedX, _ := privateKey.Curve.ScalarMult(ephemPub.X, ephemPub.Y, privateKey.D.Bytes())
+	sharedSecret := cs.Keccak256(sharedX.Bytes())
+
+	block, err := aes.NewCipher(sharedSecret[:32])
 	if err != nil {
 		return nil, err
 	}
@@ -121,12 +140,19 @@ func (cs *CryptoService) DecryptVote(encryptedVote []byte, privateKey *ecdsa.Pri
 	}
 
 	nonceSize := gcm.NonceSize()
-	if len(encryptedVote) < nonceSize {
-		return nil, errors.New("encrypted vote too short")
+	startPos := int(2 + ephemPubLen)
+
+	// Extract nonce and ciphertext
+	nonce := encryptedVote[startPos : startPos+nonceSize]
+	ciphertext := encryptedVote[startPos+nonceSize:]
+
+	// Decrypt
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt: %v", err)
 	}
 
-	nonce, ciphertext := encryptedVote[:nonceSize], encryptedVote[nonceSize:]
-	return gcm.Open(nil, nonce, ciphertext, nil)
+	return plaintext, nil
 }
 
 // HashPrivateKey creates a hash of private key for verification
