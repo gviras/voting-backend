@@ -13,10 +13,5 @@ type VotePayload struct {
 	Choice     string
 	VoterID    string
 	ElectionID string
-}
-
-type VoterRegistration struct {
-	VoterID   string `json:"voter_id"`
-	PublicKey []byte `json:"public_key"`
-	Timestamp int64  `json:"timestamp"`
+	Nonce      []byte
 }

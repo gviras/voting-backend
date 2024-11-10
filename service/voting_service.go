@@ -16,6 +16,7 @@ import (
 	"time"
 	"voting-backend/encryption"
 	"voting-backend/models"
+	"voting-backend/registry"
 	"voting-backend/storage"
 )
 
@@ -34,6 +35,12 @@ type VotingService struct {
 	votedVoters          map[string]bool
 	adminKey             *ecdsa.PrivateKey
 	storagePath          string
+	verificationService  *VoterVerificationService
+}
+
+type RegisteredVoter struct {
+	VoterID    string
+	PrivateKey *ecdsa.PrivateKey
 }
 
 type AdminCredentials struct {
@@ -130,9 +137,26 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	// Initialize services
 	cryptoService, err := encryption.NewCryptoService()
 	if err != nil {
-		//log
 		return nil, err
 	}
+
+	// Initialize mock registry with configuration
+	registryConfig := officialRegistryMock.RegistryConfig{
+		VotersFilePath: filepath.Join(storagePath, "assets/voters_registry.json"),
+		AutoSave:       true,
+	}
+	registry, err := officialRegistryMock.NewMockVoterRegistry(registryConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize voter registry: %v", err)
+	}
+
+	// Load test data into registry
+	if err := registry.LoadTestData(); err != nil {
+		return nil, fmt.Errorf("failed to load voter registry data: %v", err)
+	}
+
+	// Initialize verification service
+	verificationService := NewVoterVerificationService(registry)
 
 	session := NewVotingSession(24 * time.Hour)
 	anonymizer := NewAnonymizationService(1, 30*time.Minute)
@@ -151,6 +175,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 		voteBuffer:           make([]models.Vote, 0),
 		adminKey:             adminKey,
 		storagePath:          storagePath,
+		verificationService:  verificationService,
 	}
 
 	if err := vs.loadInitialVoters(); err != nil {
@@ -173,32 +198,48 @@ func (vs *VotingService) loadInitialVoters() error {
 }
 
 // Voter Registration Methods
-func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error) {
+func (vs *VotingService) RegisterVoter(identity *models.VoterIdentity) (*RegisteredVoter, error) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
+	// 1. Check if voting session is active
 	if !vs.votingSession.IsActive() {
 		return nil, errors.New("voting registration has ended")
 	}
 
-	if vs.registeredVoters[voterID] {
-		return nil, errors.New("voter already registered")
+	// 2. Verify voter through verification service
+	if err := vs.verificationService.VerifyVoter(identity); err != nil {
+		return nil, fmt.Errorf("voter verification failed: %w", err)
 	}
 
+	// 3. Get voter details from registry to get unique code
+	voterDetails, err := vs.verificationService.officialRegistry.GetVoterDetails(identity.PersonalCode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voter details: %w", err)
+	}
+
+	// 4. Check if voter has already registered for voting
+	if vs.registeredVoters[voterDetails.UniqueCode] {
+		return nil, errors.New("voter has already registered for voting")
+	}
+
+	// 5. Generate key pair for the voter
 	privateKey, err := vs.cryptoService.GenerateKeyPair()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to generate key pair: %w", err)
 	}
 
-	registration := &models.VoterRegistration{
-		VoterID:   voterID,
+	// 6. Create a minimal registration record with only anonymous data
+	registration := models.VoterRegistration{
+		VoterID:   voterDetails.UniqueCode,
 		PublicKey: vs.cryptoService.FromECDSAPub(&privateKey.PublicKey),
 		Timestamp: time.Now().Unix(),
 	}
 
+	// Save registration and update state
 	registrationData, err := json.Marshal(registration)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal registration data: %w", err)
 	}
 
 	block := models.NewBlock(
@@ -209,13 +250,17 @@ func (vs *VotingService) RegisterVoter(voterID string) (*ecdsa.PrivateKey, error
 	)
 
 	if err := vs.store.SaveBlock("dkb", block); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to save registration to DKB: %w", err)
 	}
 
 	vs.dkbBlocks = append(vs.dkbBlocks, block)
-	vs.registeredVoters[voterID] = true
+	vs.registeredVoters[voterDetails.UniqueCode] = true
 
-	return privateKey, nil
+	// Return the unique code along with the private key
+	return &RegisteredVoter{
+		VoterID:    voterDetails.UniqueCode,
+		PrivateKey: privateKey,
+	}, nil
 }
 
 // Vote Casting Methods
@@ -231,26 +276,25 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 		return err
 	}
 
+	// Validate voter-provided nonce
+	if err := vs.cryptoService.ValidateNonce(vote.Nonce); err != nil {
+		return fmt.Errorf("invalid nonce: %w", err)
+	}
+
 	encryptedVote, err := vs.cryptoService.EncryptVoteData(*vote)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt vote data: %v", err)
 	}
 
-	// Create a new vote record
-	nonce, err := vs.cryptoService.GenerateNonce()
-	if err != nil {
-		return err
-	}
-
 	voteRecord := &models.Vote{
 		ID:              uuid.New().String(),
 		EncryptedChoice: encryptedVote,
-		Nonce:           nonce,
+		Nonce:           vote.Nonce,
 		Timestamp:       time.Now().Unix(),
 		PublicKeyHash:   vs.cryptoService.Keccak256(vs.cryptoService.FromECDSAPub(&privateKey.PublicKey)),
 	}
 
-	signature, err := vs.cryptoService.Sign(vs.cryptoService.Keccak256(append(encryptedVote, nonce...)), privateKey)
+	signature, err := vs.cryptoService.Sign(vs.cryptoService.Keccak256(append(encryptedVote, vote.Nonce...)), privateKey)
 	if err != nil {
 		return err
 	}
@@ -504,4 +548,12 @@ func ParsePrivateKey(keyStr string) (*ecdsa.PrivateKey, error) {
 	}
 
 	return privateKey, nil
+}
+
+func (vs *VotingService) GetVoterUniqueCode(personalCode string) (string, error) {
+	voterDetails, err := vs.verificationService.officialRegistry.GetVoterDetails(personalCode)
+	if err != nil {
+		return "", fmt.Errorf("failed to get voter details: %w", err)
+	}
+	return voterDetails.UniqueCode, nil
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"syscall"
 	"time"
@@ -28,7 +29,13 @@ type Config struct {
 }
 
 type RegisterVoterRequest struct {
-	VoterID string `json:"voter_id"`
+	PersonalCode string `json:"personal_code"`
+	FirstName    string `json:"first_name"`
+	LastName     string `json:"last_name"`
+	DateOfBirth  string `json:"date_of_birth"` // Format: "2006-01-02"
+	Citizenship  string `json:"citizenship"`
+	Address      string `json:"address"`
+	Declaration  bool   `json:"declaration"`
 }
 
 type RegisterVoterResponse struct {
@@ -41,6 +48,7 @@ type CastVoteRequest struct {
 	VoterID    string `json:"voter_id"`
 	Candidate  string `json:"candidate"`
 	PrivateKey string `json:"private_key"`
+	Nonce      string `json:"nonce"`
 }
 
 type CountVotesRequest struct {
@@ -161,30 +169,115 @@ func (s *Server) handleRegisterVoter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enable CORS for development
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	var req RegisterVoterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	println("Received registration request for voter: ", req.PersonalCode)
+	// Validate required fields
+	if err := validateRegistrationRequest(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-	privateKey, err := s.votingService.RegisterVoter(req.VoterID)
+	// Parse date string to time.Time
+	dateOfBirth, err := time.Parse("2006-01-02", req.DateOfBirth)
 	if err != nil {
+		http.Error(w, "Invalid date format. Use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	// Create VoterIdentity from request
+	voterIdentity := &models.VoterIdentity{
+		PersonalCode: req.PersonalCode,
+		FirstName:    req.FirstName,
+		LastName:     req.LastName,
+		DateOfBirth:  dateOfBirth,
+		Citizenship:  req.Citizenship,
+		Address:      req.Address,
+	}
+
+	// Register voter using the voting service
+	registeredVoter, err := s.votingService.RegisterVoter(voterIdentity)
+	if err != nil {
+		// Log the error for debugging
+		log.Printf("Voter registration failed: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Format keys as hex strings
-	privKeyBytes := crypto.FromECDSA(privateKey)
-	pubKeyBytes := crypto.FromECDSAPub(&privateKey.PublicKey)
+	privKeyBytes := crypto.FromECDSA(registeredVoter.PrivateKey)
+	pubKeyBytes := crypto.FromECDSAPub(&registeredVoter.PrivateKey.PublicKey)
 
 	response := RegisterVoterResponse{
-		VoterID:    req.VoterID,
+		VoterID:    registeredVoter.VoterID, // Using personal code as voter ID
 		PublicKey:  hex.EncodeToString(pubKeyBytes),
 		PrivateKey: hex.EncodeToString(privKeyBytes),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func validateRegistrationRequest(req *RegisterVoterRequest) error {
+	if req.PersonalCode == "" {
+		return fmt.Errorf("personal code is required")
+	}
+	if req.FirstName == "" {
+		return fmt.Errorf("first name is required")
+	}
+	if req.LastName == "" {
+		return fmt.Errorf("last name is required")
+	}
+	if req.DateOfBirth == "" {
+		return fmt.Errorf("date of birth is required")
+	}
+	if req.Citizenship == "" {
+		return fmt.Errorf("citizenship is required")
+	}
+	if req.Address == "" {
+		return fmt.Errorf("address is required")
+	}
+	if !req.Declaration {
+		return fmt.Errorf("declaration must be accepted")
+	}
+
+	// Basic format validation
+	if len(req.PersonalCode) != 11 {
+		return fmt.Errorf("personal code must be exactly 11 digits")
+	}
+	if len(req.FirstName) < 2 {
+		return fmt.Errorf("first name must be at least 2 characters")
+	}
+	if len(req.LastName) < 2 {
+		return fmt.Errorf("last name must be at least 2 characters")
+	}
+	if req.Citizenship != "LT" {
+		return fmt.Errorf("only Lithuanian citizens (LT) are eligible")
+	}
+	if len(req.Address) < 5 {
+		return fmt.Errorf("address must be at least 5 characters")
+	}
+
+	// Date format validation
+	if _, err := time.Parse("2006-01-02", req.DateOfBirth); err != nil {
+		return fmt.Errorf("invalid date format. Use YYYY-MM-DD")
+	}
+
+	return nil
 }
 
 func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +292,11 @@ func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !regexp.MustCompile(`^\d{6}$`).MatchString(req.Nonce) {
+		http.Error(w, "Nonce must be exactly 6 digits", http.StatusBadRequest)
+		return
+	}
+
 	fmt.Printf("Received vote request for voter: %s\n", req.VoterID)
 
 	// Convert private key string back to ECDSA private key
@@ -208,10 +306,15 @@ func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Convert uint64 nonce to bytes
+	nonceBytes := make([]byte, 32)
+	copy(nonceBytes[26:], []byte(req.Nonce)) // Put 6 digits at the end, leaving rest as zeros
+
 	vote := &models.VotePayload{
 		Choice:     req.Candidate,
 		VoterID:    req.VoterID,
 		ElectionID: "election-2024",
+		Nonce:      nonceBytes,
 	}
 
 	fmt.Printf("Processing vote for candidate: %s\n", req.Candidate)
@@ -362,14 +465,6 @@ func parseFlags() *Config {
 func setupStorageDirectory(baseDir string) error {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return err
-	}
-
-	subdirs := []string{"dkb", "evb", "voters"}
-	for _, dir := range subdirs {
-		path := filepath.Join(baseDir, dir)
-		if err := os.MkdirAll(path, 0755); err != nil {
-			return err
-		}
 	}
 
 	return nil

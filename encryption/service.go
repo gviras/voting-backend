@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/roasbeef/go-go-gadget-paillier" // Example library for Paillier homomorphic encryption
@@ -82,6 +83,14 @@ func (cs *CryptoService) GenerateNonce() ([]byte, error) {
 	nonce := make([]byte, 32)
 	_, err := rand.Read(nonce)
 	return nonce, err
+}
+
+func (cs *CryptoService) ValidateNonce(nonce []byte) error {
+	// Change validation to accept 6-digit nonce (we'll pad it)
+	if len(nonce) != 32 {
+		return errors.New("nonce must be 32 bytes long")
+	}
+	return nil
 }
 
 // Sign creates a digital signature of data using the private key
