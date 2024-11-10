@@ -21,7 +21,7 @@ type Block struct {
 func NewBlock(index uint64, data []byte, prevHash []byte, difficulty uint8) *Block {
 	block := &Block{
 		Index:      index,
-		Timestamp:  time.Now().Unix(),
+		Timestamp:  time.Now().UnixNano() + int64(index),
 		Data:       data,
 		PrevHash:   prevHash,
 		Difficulty: difficulty,

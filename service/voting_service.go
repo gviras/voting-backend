@@ -399,7 +399,7 @@ func (vs *VotingService) processBatchedVotes() error {
 			Timestamp:  lastTimestamp,
 			Data:       voteData,
 			PrevHash:   vs.getLastEVBHash(),
-			Difficulty: 1,
+			Difficulty: 2,
 		}
 
 		block.Mine()

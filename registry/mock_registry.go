@@ -98,32 +98,6 @@ func (m *MockVoterRegistry) LoadVotersFromFile() error {
 	return nil
 }
 
-func (m *MockVoterRegistry) SaveVotersToFile() error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	votersData := struct {
-		Voters []*VoterDetails `json:"voters"`
-	}{
-		Voters: make([]*VoterDetails, 0, len(m.voters)),
-	}
-
-	for _, voter := range m.voters {
-		votersData.Voters = append(votersData.Voters, voter)
-	}
-
-	data, err := json.MarshalIndent(votersData, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal voter data: %v", err)
-	}
-
-	if err := os.WriteFile(m.config.VotersFilePath, data, 0644); err != nil {
-		return fmt.Errorf("failed to save voters file: %v", err)
-	}
-
-	return nil
-}
-
 func (m *MockVoterRegistry) createDefaultVotersFile() error {
 	defaultVoters := struct {
 		Voters []*VoterDetails `json:"voters"`
@@ -175,22 +149,6 @@ func validateVoterData(voter *VoterDetails) error {
 	}
 	if voter.Citizenship == "" {
 		return fmt.Errorf("citizenship is required")
-	}
-	return nil
-}
-
-func (m *MockVoterRegistry) UpdateVoter(voter *VoterDetails) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := validateVoterData(voter); err != nil {
-		return err
-	}
-
-	m.voters[voter.PersonalCode] = voter
-
-	if m.config.AutoSave {
-		return m.SaveVotersToFile()
 	}
 	return nil
 }
