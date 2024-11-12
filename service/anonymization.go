@@ -29,20 +29,37 @@ func (as *AnonymizationService) AnonymizeVotes(votes []models.Vote) []models.Vot
 	anonymizedVotes := make([]models.Vote, len(votes))
 	copy(anonymizedVotes, votes)
 
-	// Shuffle votes
+	// First, shuffle the votes to break their original order
 	for i := len(anonymizedVotes) - 1; i > 0; i-- {
 		j, _ := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
 		anonymizedVotes[i], anonymizedVotes[j.Int64()] = anonymizedVotes[j.Int64()], anonymizedVotes[i]
 	}
 
-	// Mix timestamps
-	baseTime := time.Now().Add(-as.mixWindow)
-	for i := range anonymizedVotes {
-		offset, _ := rand.Int(rand.Reader, big.NewInt(int64(as.mixWindow.Seconds())))
-		anonymizedVotes[i].Timestamp = baseTime.Add(time.Duration(offset.Int64()) * time.Second).Unix()
+	// Find the earliest and latest timestamps in the batch
+	var minTime, maxTime int64
+	minTime = anonymizedVotes[0].Timestamp
+	maxTime = anonymizedVotes[0].Timestamp
+
+	for _, vote := range anonymizedVotes {
+		if vote.Timestamp < minTime {
+			minTime = vote.Timestamp
+		}
+		if vote.Timestamp > maxTime {
+			maxTime = vote.Timestamp
+		}
 	}
 
-	// Sort by new timestamps
+	// Calculate time range for the batch
+	timeRange := maxTime - minTime
+
+	// Redistribute timestamps evenly within the original time range
+	for i := range anonymizedVotes {
+		// Calculate a random position within the time range
+		offset, _ := rand.Int(rand.Reader, big.NewInt(timeRange))
+		anonymizedVotes[i].Timestamp = minTime + offset.Int64()
+	}
+
+	// Sort by new timestamps to maintain chronological order
 	sort.Slice(anonymizedVotes, func(i, j int) bool {
 		return anonymizedVotes[i].Timestamp < anonymizedVotes[j].Timestamp
 	})

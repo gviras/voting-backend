@@ -1,6 +1,7 @@
 package encryption
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/json"
@@ -129,4 +130,29 @@ func (cs *CryptoService) Keccak256(data ...[]byte) []byte {
 		d.Write(b)
 	}
 	return d.Sum(nil)
+}
+
+func (cs *CryptoService) PublicKeyFromBytes(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
+	if len(pubKeyBytes) == 0 {
+		return nil, fmt.Errorf("empty public key bytes")
+	}
+
+	// Use ethereum's crypto package to convert bytes back to public key
+	pubKey, err := crypto.UnmarshalPubkey(pubKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal public key: %v", err)
+	}
+
+	return pubKey, nil
+}
+
+func (cs *CryptoService) VerifyPublicKeyHash(publicKey *ecdsa.PublicKey, expectedHash []byte) bool {
+	if publicKey == nil {
+		return false
+	}
+
+	pubKeyBytes := cs.FromECDSAPub(publicKey)
+	actualHash := cs.Keccak256(pubKeyBytes)
+
+	return bytes.Equal(actualHash, expectedHash)
 }

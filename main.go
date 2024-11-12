@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"voting-backend/models"
@@ -104,6 +105,10 @@ type BlockInfo struct {
 	Nonce     uint64 `json:"nonce"`
 }
 
+type VerifyVoteRequest struct {
+	PrivateKey string `json:"private_key"`
+}
+
 func main() {
 	config := parseFlags()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -128,6 +133,7 @@ func main() {
 	http.HandleFunc("/api/count-votes", server.handleCountVotes)
 	http.HandleFunc("/api/results", server.handleGetResults)
 	http.HandleFunc("/api/verify-count", server.handleVerifyCount)
+	http.HandleFunc("/api/verify/vote-details", server.handleVerifyVoteDetails)
 
 	// Admin
 	http.HandleFunc("/api/admin/credentials", server.handleGetAdminCredentials)
@@ -674,4 +680,53 @@ func convertToChainInfo(blocks []*models.Block, chainType string) *ChainInfo {
 	}
 
 	return info
+}
+
+func (s *Server) handleVerifyVoteDetails(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for development
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Change to POST since we're sending private key
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed. Use POST for secure key transfer", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req VerifyVoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate private key
+	if req.PrivateKey == "" {
+		http.Error(w, "Private key is required", http.StatusBadRequest)
+		return
+	}
+
+	// Clean private key format
+	privateKey := strings.TrimPrefix(req.PrivateKey, "0x")
+
+	// Verify vote using the private key
+	result, err := s.votingService.GetCountingService().VerifyVote(privateKey)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid private key format") {
+			http.Error(w, "Invalid private key format", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to verify vote: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }

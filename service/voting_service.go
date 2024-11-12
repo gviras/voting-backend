@@ -62,6 +62,11 @@ type BlockchainResponse struct {
 	LastHash   string          `json:"last_hash"`
 }
 
+type VoteCastResult struct {
+	VoteID    string `json:"vote_id"`
+	Timestamp int64  `json:"timestamp"`
+}
+
 func loadOrGenerateAdminKey(storagePath string) (*ecdsa.PrivateKey, error) {
 	adminKeyPath := filepath.Join(storagePath, "admin_credentials.json")
 
@@ -159,7 +164,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	verificationService := NewVoterVerificationService(registry)
 
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(1, 30*time.Minute)
+	anonymizer := NewAnonymizationService(5, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store)
 
 	vs := &VotingService{
@@ -286,11 +291,14 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 		return fmt.Errorf("failed to encrypt vote data: %v", err)
 	}
 
+	voteID := uuid.New().String()
+	timestamp := time.Now().Unix()
+
 	voteRecord := &models.Vote{
-		ID:              uuid.New().String(),
+		ID:              voteID,
 		EncryptedChoice: encryptedVote,
 		Nonce:           vote.Nonce,
-		Timestamp:       time.Now().Unix(),
+		Timestamp:       timestamp,
 		PublicKeyHash:   vs.cryptoService.Keccak256(vs.cryptoService.FromECDSAPub(&privateKey.PublicKey)),
 	}
 

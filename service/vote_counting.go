@@ -1,11 +1,15 @@
 package service
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/crypto"
+	"strings"
 	"sync"
+	"time"
 	"voting-backend/encryption"
 	"voting-backend/models"
 	"voting-backend/storage"
@@ -17,6 +21,28 @@ type VoteCountingService struct {
 	mu            sync.RWMutex
 	counted       map[string]bool // Track counted votes by ID
 	results       map[string]int  // Store voting results
+}
+
+type SingleVoteVerification struct {
+	VoteID          string   `json:"vote_id"`
+	IsValid         bool     `json:"is_valid"`
+	BlockIndex      uint64   `json:"block_index"`
+	Timestamp       int64    `json:"timestamp"`
+	SignatureValid  bool     `json:"signature_valid"`
+	DecryptionValid bool     `json:"decryption_valid"`
+	Issues          []string `json:"issues,omitempty"`
+}
+
+type SingleVoteVerificationResult struct {
+	BlockIndex      uint64   `json:"block_index"`
+	IsValid         bool     `json:"is_valid"`
+	BlockValid      bool     `json:"block_valid"`
+	TimestampValid  bool     `json:"timestamp_valid"`
+	ChainLinkValid  bool     `json:"chain_link_valid"`
+	EncryptionValid bool     `json:"encryption_valid"`
+	NonceValid      bool     `json:"nonce_valid"`
+	Issues          []string `json:"issues,omitempty"`
+	Timestamp       int64    `json:"timestamp"`
 }
 
 func NewVoteCountingService(cryptoService *encryption.CryptoService, store *storage.JSONStore) *VoteCountingService {
@@ -161,6 +187,112 @@ func (vcs *VoteCountingService) verifyVoteSignature(vote models.Vote, decryptedV
 		vote.Signature,
 		&ecdsa.PublicKey{}, // You need to reconstruct the public key from the hash
 	)
+}
+
+func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVerificationResult, error) {
+	vcs.mu.RLock()
+	defer vcs.mu.RUnlock()
+
+	result := &SingleVoteVerificationResult{
+		Issues: make([]string, 0),
+	}
+
+	// Parse private key
+	privateKeyHex = strings.TrimPrefix(privateKeyHex, "0x")
+	privateKey, err := crypto.HexToECDSA(privateKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key format: %w", err)
+	}
+
+	// Generate public key hash
+	publicKeyHash := vcs.cryptoService.Keccak256(
+		vcs.cryptoService.FromECDSAPub(&privateKey.PublicKey),
+	)
+	fmt.Printf("Looking for vote with public key hash: %x\n", publicKeyHash)
+
+	// Load EVB chain
+	blocks, err := vcs.store.LoadChain("evb")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
+	}
+
+	// Find the vote using public key hash
+	var foundBlock *models.Block
+	var foundVote models.Vote
+	var previousBlock *models.Block
+
+	for i, block := range blocks {
+		fmt.Printf("Found matching vote in block %d\n", i)
+		var vote models.Vote
+		if err := json.Unmarshal(block.Data, &vote); err != nil {
+			fmt.Printf("Failed to unmarshal vote in block %d: %v\n", i, err)
+			continue
+		}
+		fmt.Printf("Block %d vote hash: %x\n", i, vote.PublicKeyHash)
+
+		if bytes.Equal(vote.PublicKeyHash, publicKeyHash) {
+			fmt.Printf("Found matching vote in block %d\n", i)
+
+			foundBlock = block
+			foundVote = vote
+			if i > 0 {
+				previousBlock = blocks[i-1]
+			}
+			result.BlockIndex = block.Index
+			result.Timestamp = block.Timestamp
+			break
+		}
+	}
+
+	if foundBlock == nil {
+		result.Issues = append(result.Issues, "No vote found for this private key")
+		return result, nil
+	}
+
+	// Verify block integrity
+	result.BlockValid = foundBlock.Validate()
+	if !result.BlockValid {
+		result.Issues = append(result.Issues, "Block integrity check failed")
+	}
+
+	// Verify chain link
+	if previousBlock != nil {
+		result.ChainLinkValid = bytes.Equal(foundBlock.PrevHash, previousBlock.Hash)
+		if !result.ChainLinkValid {
+			result.Issues = append(result.Issues, "Invalid chain link with previous block")
+		}
+	} else {
+		result.ChainLinkValid = true
+	}
+
+	// Verify timestamp
+	result.TimestampValid = foundVote.Timestamp > 0 &&
+		foundVote.Timestamp <= time.Now().Unix() &&
+		(previousBlock == nil || foundVote.Timestamp > previousBlock.Timestamp)
+	if !result.TimestampValid {
+		result.Issues = append(result.Issues, "Invalid timestamp")
+	}
+
+	// Verify nonce
+	result.NonceValid = len(foundVote.Nonce) == 32
+	if !result.NonceValid {
+		result.Issues = append(result.Issues, "Invalid nonce format")
+	}
+
+	// Verify encryption format and optionally decrypt
+	result.EncryptionValid = len(foundVote.EncryptedChoice) > 0
+	if !result.EncryptionValid {
+		result.Issues = append(result.Issues, "Invalid vote encryption format")
+	}
+
+	// Final validity check
+	result.IsValid = result.BlockValid &&
+		result.ChainLinkValid &&
+		result.TimestampValid &&
+		result.NonceValid &&
+		result.EncryptionValid
+
+	return result, nil
 }
 
 // GetLatestResults returns the current vote count without recounting
