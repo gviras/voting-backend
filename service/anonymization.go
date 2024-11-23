@@ -21,7 +21,7 @@ func NewAnonymizationService(batchSize int, mixWindow time.Duration) *Anonymizat
 }
 
 func (as *AnonymizationService) AnonymizeVotes(votes []models.Vote) []models.Vote {
-	if len(votes) == 0 {
+	if len(votes) == 0 || len(votes) == 1 {
 		return votes
 	}
 
@@ -29,7 +29,7 @@ func (as *AnonymizationService) AnonymizeVotes(votes []models.Vote) []models.Vot
 	anonymizedVotes := make([]models.Vote, len(votes))
 	copy(anonymizedVotes, votes)
 
-	// First, shuffle the votes to break their original order
+	// If we have more than one vote, shuffle them
 	for i := len(anonymizedVotes) - 1; i > 0; i-- {
 		j, _ := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
 		anonymizedVotes[i], anonymizedVotes[j.Int64()] = anonymizedVotes[j.Int64()], anonymizedVotes[i]
@@ -54,7 +54,6 @@ func (as *AnonymizationService) AnonymizeVotes(votes []models.Vote) []models.Vot
 
 	// Redistribute timestamps evenly within the original time range
 	for i := range anonymizedVotes {
-		// Calculate a random position within the time range
 		offset, _ := rand.Int(rand.Reader, big.NewInt(timeRange))
 		anonymizedVotes[i].Timestamp = minTime + offset.Int64()
 	}

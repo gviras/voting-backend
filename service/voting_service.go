@@ -164,7 +164,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	verificationService := NewVoterVerificationService(registry)
 
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(5, 30*time.Minute)
+	anonymizer := NewAnonymizationService(1, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store)
 
 	vs := &VotingService{
@@ -273,6 +273,7 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
+	// 1. Check voting session and voter verification
 	if !vs.votingSession.IsActive() {
 		return errors.New("voting session has ended")
 	}
@@ -281,49 +282,89 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 		return err
 	}
 
-	// Validate voter-provided nonce
+	// 2. Validate nonce
 	if err := vs.cryptoService.ValidateNonce(vote.Nonce); err != nil {
 		return fmt.Errorf("invalid nonce: %w", err)
 	}
 
+	// 3. Encrypt vote with homomorphic encryption
 	encryptedVote, err := vs.cryptoService.EncryptVoteData(*vote)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt vote data: %v", err)
 	}
 
+	// 4. Create vote record
 	voteID := uuid.New().String()
 	timestamp := time.Now().Unix()
 
 	voteRecord := &models.Vote{
 		ID:              voteID,
-		EncryptedChoice: encryptedVote,
+		EncryptedChoice: encryptedVote, // This now contains the VoteEncryptionPackage
 		Nonce:           vote.Nonce,
 		Timestamp:       timestamp,
 		PublicKeyHash:   vs.cryptoService.Keccak256(vs.cryptoService.FromECDSAPub(&privateKey.PublicKey)),
 	}
 
-	signature, err := vs.cryptoService.Sign(vs.cryptoService.Keccak256(append(encryptedVote, vote.Nonce...)), privateKey)
+	// 5. Sign the encrypted vote
+	signatureData := append(encryptedVote, vote.Nonce...)
+	signature, err := vs.cryptoService.Sign(vs.cryptoService.Keccak256(signatureData), privateKey)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to sign vote: %v", err)
 	}
 	voteRecord.Signature = signature
 
-	// Add the vote record to the buffer
+	// 6. Add to buffer for batch processing
 	vs.voteBuffer = append(vs.voteBuffer, *voteRecord)
 	vs.votedVoters[voterID] = true
 
-	fmt.Printf("Vote buffer size: %d, Batch size: %d\n", len(vs.voteBuffer), vs.anonymizationService.batchSize)
-
-	// Process votes if the buffer size meets the batch requirement
+	// 7. Process batch if buffer is full
 	if len(vs.voteBuffer) >= vs.anonymizationService.batchSize {
-		fmt.Println("Processing vote batch...")
 		if err := vs.processBatchedVotes(); err != nil {
 			return fmt.Errorf("failed to process vote batch: %v", err)
 		}
-		fmt.Println("Vote batch processed successfully")
 	}
 
 	return nil
+}
+
+func (vs *VotingService) GetFinalResults() (*VotingResults, error) {
+	if vs.votingSession.IsActive() {
+		return nil, errors.New("voting is still active, final results not available")
+	}
+
+	// Get the encrypted results first
+	results, err := vs.GetCountingService().CountVotes()
+	if err != nil {
+		return nil, err
+	}
+
+	// Debug: Dump the current mappings
+	vs.cryptoService.DumpChoiceMapping()
+
+	// Create new results with revealed choices
+	revealedResults := make(map[string]int64)
+
+	// Get the mapping
+	choiceMapping := vs.cryptoService.GetChoiceMapping()
+
+	fmt.Printf("\nProcessing final results:\n")
+	for hash, count := range results.Results {
+		fmt.Printf("Processing hash: %s (count: %d)\n", hash, count)
+
+		if candidateName, exists := choiceMapping[hash]; exists {
+			fmt.Printf("Found mapping: %s -> %s\n", hash, candidateName)
+			revealedResults[candidateName] = count
+		} else {
+			fmt.Printf("No mapping found for hash: %s\n", hash)
+			revealedResults[fmt.Sprintf("Unknown-%s", hash)] = count
+		}
+	}
+
+	return &VotingResults{
+		TotalVotes:     results.TotalVotes,
+		Results:        revealedResults,
+		ProcessedVotes: results.ProcessedVotes,
+	}, nil
 }
 
 // Blockchain Methods
@@ -378,12 +419,14 @@ func (vs *VotingService) processBatchedVotes() error {
 		return nil
 	}
 
-	fmt.Printf("Processing %d votes\n", len(vs.voteBuffer))
+	fmt.Printf("Processing batch of %d votes\n", len(vs.voteBuffer))
 
+	// 1. Create a copy of current batch
 	currentBatch := make([]models.Vote, len(vs.voteBuffer))
 	copy(currentBatch, vs.voteBuffer)
 	vs.voteBuffer = make([]models.Vote, 0)
 
+	// 2. Anonymize the votes (shuffling timestamps, etc.)
 	anonymizedVotes := vs.anonymizationService.AnonymizeVotes(currentBatch)
 
 	lastTimestamp := int64(0)
@@ -391,20 +434,53 @@ func (vs *VotingService) processBatchedVotes() error {
 		lastTimestamp = vs.evbBlocks[len(vs.evbBlocks)-1].Timestamp
 	}
 
+	// 3. Process each anonymized vote
 	for _, av := range anonymizedVotes {
-		cleanVote := vs.anonymizationService.RemoveVoterSignatures(av)
+		// Debug log
+		fmt.Printf("Processing vote ID: %s\n", av.ID)
+
+		var votePackage encryption.VoteEncryptionPackage
+		// First unmarshal the current encryption package
+		if err := json.Unmarshal(av.EncryptedChoice, &votePackage); err != nil {
+			fmt.Printf("Failed to unmarshal vote package: %v\n", err)
+			return fmt.Errorf("failed to unmarshal vote package: %v", err)
+		}
+
+		// Create stripped package with only homomorphic data
+		strippedPackage := encryption.VoteEncryptionPackage{
+			HomomorphicVoteData: votePackage.HomomorphicVoteData,
+			Nonce:               av.Nonce,
+			// Omit other fields to strip voter data
+		}
+
+		// Marshal the stripped package
+		strippedData, err := json.Marshal(strippedPackage)
+		if err != nil {
+			fmt.Printf("Failed to marshal stripped package: %v\n", err)
+			return fmt.Errorf("failed to marshal stripped package: %v", err)
+		}
+
+		// Create clean vote
+		cleanVote := models.Vote{
+			ID:              av.ID,
+			EncryptedChoice: strippedData,
+			Nonce:           av.Nonce,
+			Timestamp:       ensureUniqueTimestamp(lastTimestamp),
+		}
+
+		// Debug log
+		fmt.Printf("Created clean vote with ID: %s\n", cleanVote.ID)
 
 		voteData, err := json.Marshal(cleanVote)
 		if err != nil {
+			fmt.Printf("Failed to marshal clean vote: %v\n", err)
 			return fmt.Errorf("failed to marshal vote: %v", err)
 		}
 
-		// Ensure unique timestamp
-		lastTimestamp = ensureUniqueTimestamp(lastTimestamp)
-
+		// Create and mine new block
 		block := &models.Block{
 			Index:      uint64(len(vs.evbBlocks)),
-			Timestamp:  lastTimestamp,
+			Timestamp:  cleanVote.Timestamp,
 			Data:       voteData,
 			PrevHash:   vs.getLastEVBHash(),
 			Difficulty: 2,
@@ -412,16 +488,46 @@ func (vs *VotingService) processBatchedVotes() error {
 
 		block.Mine()
 
+		// Save block
 		if err := vs.store.SaveBlock("evb", block); err != nil {
+			fmt.Printf("Failed to save block: %v\n", err)
 			return fmt.Errorf("failed to save vote block: %v", err)
 		}
 
 		vs.evbBlocks = append(vs.evbBlocks, block)
-		fmt.Printf("Added block %d to EVB chain with timestamp %d\n",
-			block.Index, block.Timestamp)
+		lastTimestamp = block.Timestamp
+
+		fmt.Printf("Successfully processed and saved vote ID: %s\n", cleanVote.ID)
 	}
 
-	fmt.Println("Batch processing completed")
+	fmt.Printf("Successfully processed batch of %d votes\n", len(anonymizedVotes))
+	return nil
+}
+
+func (vs *VotingService) ReloadChains() error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	// Reload DKB chain
+	dkbBlocks, err := vs.store.LoadChain("dkb")
+	if err != nil {
+		return fmt.Errorf("failed to reload DKB chain: %w", err)
+	}
+	vs.dkbBlocks = dkbBlocks
+
+	// Reload EVB chain
+	evbBlocks, err := vs.store.LoadChain("evb")
+	if err != nil {
+		return fmt.Errorf("failed to reload EVB chain: %w", err)
+	}
+	vs.evbBlocks = evbBlocks
+
+	// Rebuild the registered voters map from DKB
+	vs.registeredVoters = make(map[string]bool)
+	if err := vs.loadInitialVoters(); err != nil {
+		return fmt.Errorf("failed to reload registered voters: %w", err)
+	}
+
 	return nil
 }
 

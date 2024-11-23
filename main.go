@@ -134,6 +134,7 @@ func main() {
 	http.HandleFunc("/api/results", server.handleGetResults)
 	http.HandleFunc("/api/verify-count", server.handleVerifyCount)
 	http.HandleFunc("/api/verify/vote-details", server.handleVerifyVoteDetails)
+	http.HandleFunc("/api/final-results", server.handleGetFinalResults)
 
 	// Admin
 	http.HandleFunc("/api/admin/credentials", server.handleGetAdminCredentials)
@@ -144,6 +145,7 @@ func main() {
 	http.HandleFunc("/api/blockchain/block", server.handleGetBlock)
 	http.HandleFunc("/api/blockchain/validate", server.handleValidateChains)
 	http.HandleFunc("/api/blockchain/status", server.handleGetBlockchainStatus)
+	http.HandleFunc("/api/blockchain/reload", server.handleReloadChains)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -729,4 +731,86 @@ func (s *Server) handleVerifyVoteDetails(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleReloadChains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Enable CORS for development
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	// Handle preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Attempt to reload chains
+	if err := s.votingService.ReloadChains(); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to reload chains: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Get updated chain status after reload
+	dkbBlocks, err := s.votingService.GetDKBChain()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get DKB chain after reload: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	evbBlocks, err := s.votingService.GetEVBChain()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get EVB chain after reload: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Prepare response with chain status
+	response := BlockchainStatusResponse{
+		DKBChain: convertToChainInfo(dkbBlocks, "dkb"),
+		EVBChain: convertToChainInfo(evbBlocks, "evb"),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleGetFinalResults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Enable CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET")
+	w.Header().Set("Content-Type", "application/json")
+
+	// Get final results
+	results, err := s.votingService.GetFinalResults()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Format response
+	response := struct {
+		Results        map[string]int64 `json:"results"`
+		TotalVotes     int              `json:"total_votes"`
+		ProcessedVotes int              `json:"processed_votes"`
+		VotingClosed   bool             `json:"voting_closed"`
+	}{
+		Results:        results.Results,
+		TotalVotes:     results.TotalVotes,
+		ProcessedVotes: results.ProcessedVotes,
+		VotingClosed:   !s.votingService.IsVotingActive(),
+	}
+
+	json.NewEncoder(w).Encode(response)
 }

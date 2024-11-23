@@ -19,8 +19,8 @@ type VoteCountingService struct {
 	cryptoService *encryption.CryptoService
 	store         *storage.JSONStore
 	mu            sync.RWMutex
-	counted       map[string]bool // Track counted votes by ID
-	results       map[string]int  // Store voting results
+	counted       map[string]bool
+	results       map[string]int64 // Changed to int64 for homomorphic counting
 }
 
 type SingleVoteVerification struct {
@@ -50,7 +50,7 @@ func NewVoteCountingService(cryptoService *encryption.CryptoService, store *stor
 		cryptoService: cryptoService,
 		store:         store,
 		counted:       make(map[string]bool),
-		results:       make(map[string]int),
+		results:       make(map[string]int64),
 	}
 }
 
@@ -59,69 +59,74 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 	vcs.mu.Lock()
 	defer vcs.mu.Unlock()
 
-	// Reset counters
 	vcs.counted = make(map[string]bool)
-	vcs.results = make(map[string]int)
+	vcs.results = make(map[string]int64)
 
-	// Load EVB chain
 	blocks, err := vcs.store.LoadChain("evb")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
 	}
 
-	fmt.Printf("Starting vote count. Found %d blocks\n", len(blocks))
+	fmt.Printf("Starting homomorphic vote count. Found %d blocks\n", len(blocks))
 
-	var processedVotes int
+	// Track encrypted sums by choice hash
+	var currentSum []byte
 
-	for i, block := range blocks {
-		fmt.Printf("Processing block %d\n", i)
-
+	for _, block := range blocks {
 		var vote models.Vote
 		if err := json.Unmarshal(block.Data, &vote); err != nil {
-			fmt.Printf("Failed to unmarshal vote in block %d: %v\n", i, err)
 			continue
 		}
 
 		if vcs.counted[vote.ID] {
-			fmt.Printf("Skipping duplicate vote ID in block %d\n", i)
 			continue
 		}
 
-		// Decrypt the vote data
-		decryptedData, err := vcs.cryptoService.DecryptVoteData(vote.EncryptedChoice)
-		if err != nil {
-			fmt.Printf("Failed to decrypt vote in block %d: %v\n", i, err)
-			continue
+		// Add to running sum
+		if currentSum == nil {
+			currentSum = vote.EncryptedChoice
+		} else {
+			summedVote, err := vcs.cryptoService.AddEncryptedVotes(currentSum, vote.EncryptedChoice)
+			if err != nil {
+				continue
+			}
+			currentSum = summedVote
 		}
-
-		// Parse the decrypted data as a vote payload
-		var votePayload models.VotePayload
-		if err := json.Unmarshal(decryptedData, &votePayload); err != nil {
-			fmt.Printf("Failed to parse decrypted data in block %d: %v\n", i, err)
-			continue
-		}
-
-		// Ensure the payload contains a valid candidate choice
-		if votePayload.Choice == "" {
-			fmt.Printf("Invalid candidate choice in block %d\n", i)
-			continue
-		}
-
-		// Increment the result for the candidate
-		vcs.results[votePayload.Choice]++
 
 		vcs.counted[vote.ID] = true
-		fmt.Printf("Successfully included vote from block %d for candidate %s\n", i, votePayload.Choice)
-		processedVotes++
 	}
 
-	fmt.Printf("Vote counting completed. Counted %d valid votes out of %d blocks\n", len(vcs.counted), processedVotes)
+	// Decrypt final sums
+	if currentSum != nil {
+		decryptedData, err := vcs.cryptoService.DecryptVoteData(currentSum)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt final tally: %v", err)
+		}
+
+		// Results are now mapped by choice hash
+		if err := json.Unmarshal(decryptedData, &vcs.results); err != nil {
+			return nil, fmt.Errorf("failed to parse results: %v", err)
+		}
+	}
 
 	return &VotingResults{
 		TotalVotes:     len(vcs.counted),
-		Results:        vcs.results,
-		ProcessedVotes: processedVotes,
+		Results:        vcs.results, // Results are now mapped by choice hash
+		ProcessedVotes: len(blocks),
 	}, nil
+}
+
+func debugPrintBytes(prefix string, data []byte) {
+	fmt.Printf("%s (len=%d): %x\n", prefix, len(data), data)
+}
+
+// Helper function to convert int64 map to int map for backwards compatibility
+func convertToIntMap(int64Map map[string]int64) map[string]int64 {
+	intMap := make(map[string]int64)
+	for k, v := range int64Map {
+		intMap[k] = v
+	}
+	return intMap
 }
 
 // DecryptVote decrypts a single vote (not used for homomorphic counting, but kept for completeness)
@@ -208,9 +213,7 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 	publicKeyHash := vcs.cryptoService.Keccak256(
 		vcs.cryptoService.FromECDSAPub(&privateKey.PublicKey),
 	)
-	fmt.Printf("Looking for vote with public key hash: %x\n", publicKeyHash)
 
-	// Load EVB chain
 	blocks, err := vcs.store.LoadChain("evb")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
@@ -222,17 +225,12 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 	var previousBlock *models.Block
 
 	for i, block := range blocks {
-		fmt.Printf("Found matching vote in block %d\n", i)
 		var vote models.Vote
 		if err := json.Unmarshal(block.Data, &vote); err != nil {
-			fmt.Printf("Failed to unmarshal vote in block %d: %v\n", i, err)
 			continue
 		}
-		fmt.Printf("Block %d vote hash: %x\n", i, vote.PublicKeyHash)
 
 		if bytes.Equal(vote.PublicKeyHash, publicKeyHash) {
-			fmt.Printf("Found matching vote in block %d\n", i)
-
 			foundBlock = block
 			foundVote = vote
 			if i > 0 {
@@ -249,43 +247,29 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 		return result, nil
 	}
 
-	// Verify block integrity
-	result.BlockValid = foundBlock.Validate()
-	if !result.BlockValid {
-		result.Issues = append(result.Issues, "Block integrity check failed")
+	// Verify the VoteEncryptionPackage
+	var pkg encryption.VoteEncryptionPackage
+	if err := json.Unmarshal(foundVote.EncryptedChoice, &pkg); err != nil {
+		result.Issues = append(result.Issues, "Invalid vote encryption package")
+	} else {
+		result.EncryptionValid = len(pkg.HomomorphicVoteData) > 0
 	}
 
-	// Verify chain link
+	// Perform other verifications
+	result.BlockValid = foundBlock.Validate()
 	if previousBlock != nil {
 		result.ChainLinkValid = bytes.Equal(foundBlock.PrevHash, previousBlock.Hash)
-		if !result.ChainLinkValid {
-			result.Issues = append(result.Issues, "Invalid chain link with previous block")
-		}
 	} else {
 		result.ChainLinkValid = true
 	}
 
-	// Verify timestamp
 	result.TimestampValid = foundVote.Timestamp > 0 &&
 		foundVote.Timestamp <= time.Now().Unix() &&
 		(previousBlock == nil || foundVote.Timestamp > previousBlock.Timestamp)
-	if !result.TimestampValid {
-		result.Issues = append(result.Issues, "Invalid timestamp")
-	}
 
-	// Verify nonce
 	result.NonceValid = len(foundVote.Nonce) == 32
-	if !result.NonceValid {
-		result.Issues = append(result.Issues, "Invalid nonce format")
-	}
 
-	// Verify encryption format and optionally decrypt
-	result.EncryptionValid = len(foundVote.EncryptedChoice) > 0
-	if !result.EncryptionValid {
-		result.Issues = append(result.Issues, "Invalid vote encryption format")
-	}
-
-	// Final validity check
+	// Set final validity
 	result.IsValid = result.BlockValid &&
 		result.ChainLinkValid &&
 		result.TimestampValid &&
@@ -314,9 +298,9 @@ func (vcs *VoteCountingService) GetLatestResults() (*VotingResults, error) {
 
 // VotingResults represents the final vote count
 type VotingResults struct {
-	TotalVotes     int            `json:"total_votes"`
-	Results        map[string]int `json:"results"`
-	ProcessedVotes int            `json:"processed_votes"`
+	TotalVotes     int              `json:"total_votes"`
+	Results        map[string]int64 `json:"results"` // Changed to uint64
+	ProcessedVotes int              `json:"processed_votes"`
 }
 
 // VoteVerification represents the vote verification result
