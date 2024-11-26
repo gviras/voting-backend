@@ -16,6 +16,8 @@ github.com/holiman/uint256 v1.3.1 h1:JfTzmih28bittyHM8z360dCjIA9dbPIBlcTI6lmctQs
 github.com/holiman/uint256 v1.3.1/go.mod h1:EOMSn4q6Nyt9P6efbI3bueV4e1b3dGlUCXeiRV4ng7E=
 github.com/roasbeef/go-go-gadget-paillier v0.0.0-20181009074315-14f1f86b6000 h1:znxuF/AnRNeTsBv07YsovqSwkrHUJ47icAAKSBe1FSU=
 github.com/roasbeef/go-go-gadget-paillier v0.0.0-20181009074315-14f1f86b6000/go.mod h1:GbaLtXlO/CWjBZzgF70Gfq+iyj51b64JMWu0zT/YEkY=
+github.com/stefanomozart/paillier v0.0.0-20200114151216-aec92f8361bd h1:tNAALxkiUc/V8xEUBjtivNhxv2vK2vHEzCm4UvQRniA=
+github.com/stefanomozart/paillier v0.0.0-20200114151216-aec92f8361bd/go.mod h1:pejATRn8bSSes4jcOsP4ykREnOd8hWytElHIAS3C26g=
 golang.org/x/crypto v0.28.0 h1:GBDwsMXVQi34v5CCYUm2jkJvu4cbtru2U4TN2PSyQnw=
 golang.org/x/crypto v0.28.0/go.mod h1:rmgy+3RHxRZMyY0jjAJShp2zgEdOqj2AO7U0pYmeQ7U=
 golang.org/x/sys v0.26.0 h1:KHjCJyddX0LoSTb3J+vWpupP9p0oznkqVk/IfjymZbo=

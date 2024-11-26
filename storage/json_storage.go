@@ -67,15 +67,49 @@ func (s *JSONStore) LoadChain(chainType string) ([]*models.Block, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	chain, exists := s.chains[chainType]
-	if !exists || chain == nil {
-		return make([]*models.Block, 0), nil
+	// Load fresh from file instead of using cached version
+	chain, err := s.loadChainFromFile(chainType)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make([]*models.Block, 0), nil
+		}
+		return nil, fmt.Errorf("failed to load chain %s: %v", chainType, err)
 	}
 
-	// Return a copy of the blocks to prevent modification
+	// Validate the loaded chain
+	//if !models.ValidateChain(chain.Blocks) {
+	//	return nil, fmt.Errorf("loaded chain %s is invalid", chainType)
+	//}
+
+	// Update the cached version
+	s.chains[chainType] = chain
+
+	// Return a copy of the blocks
 	blocks := make([]*models.Block, len(chain.Blocks))
 	copy(blocks, chain.Blocks)
 	return blocks, nil
+}
+
+func (s *JSONStore) ReloadAllChains() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Clear existing chains
+	s.chains = make(map[string]*Chain)
+
+	// Reload each chain type
+	for _, chainType := range []string{"dkb", "evb"} {
+		chain, err := s.loadChainFromFile(chainType)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to reload chain %s: %v", chainType, err)
+		}
+		if chain == nil {
+			chain = &Chain{Blocks: make([]*models.Block, 0)}
+		}
+		s.chains[chainType] = chain
+	}
+
+	return nil
 }
 
 func (s *JSONStore) loadChainFromFile(chainType string) (*Chain, error) {

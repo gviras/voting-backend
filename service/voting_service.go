@@ -509,11 +509,21 @@ func (vs *VotingService) ReloadChains() error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
+	// Force reload from disk
+	if err := vs.store.ReloadAllChains(); err != nil {
+		return fmt.Errorf("failed to reload chains from disk: %w", err)
+	}
+
 	// Reload DKB chain
 	dkbBlocks, err := vs.store.LoadChain("dkb")
 	if err != nil {
 		return fmt.Errorf("failed to reload DKB chain: %w", err)
 	}
+
+	//// Validate DKB chain
+	//if !models.ValidateChain(dkbBlocks) {
+	//	return fmt.Errorf("reloaded DKB chain is invalid")
+	//}
 	vs.dkbBlocks = dkbBlocks
 
 	// Reload EVB chain
@@ -521,12 +531,32 @@ func (vs *VotingService) ReloadChains() error {
 	if err != nil {
 		return fmt.Errorf("failed to reload EVB chain: %w", err)
 	}
+
+	//// Validate EVB chain
+	//if !models.ValidateChain(evbBlocks) {
+	//	return fmt.Errorf("reloaded EVB chain is invalid")
+	//}
 	vs.evbBlocks = evbBlocks
 
 	// Rebuild the registered voters map from DKB
 	vs.registeredVoters = make(map[string]bool)
+	vs.votedVoters = make(map[string]bool)
+
+	// Reload registered voters from DKB chain
 	if err := vs.loadInitialVoters(); err != nil {
 		return fmt.Errorf("failed to reload registered voters: %w", err)
+	}
+
+	// Rebuild voted voters from EVB chain
+	for _, block := range evbBlocks {
+		var vote models.Vote
+		if err := json.Unmarshal(block.Data, &vote); err != nil {
+			continue
+		}
+		// Mark voter as having voted based on their public key hash
+		if len(vote.PrivateKeyHash) > 0 {
+			vs.votedVoters[hex.EncodeToString(vote.PrivateKeyHash)] = true
+		}
 	}
 
 	return nil

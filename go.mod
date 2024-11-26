@@ -13,5 +13,6 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/holiman/uint256 v1.3.1 // indirect
 	github.com/roasbeef/go-go-gadget-paillier v0.0.0-20181009074315-14f1f86b6000 // indirect
+	github.com/stefanomozart/paillier v0.0.0-20200114151216-aec92f8361bd // indirect
 	golang.org/x/sys v0.26.0 // indirect
 )
