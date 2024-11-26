@@ -140,7 +140,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	}
 
 	// Initialize services
-	cryptoService, err := encryption.NewCryptoService()
+	cryptoService, err := encryption.NewCryptoService(filepath.Join(storagePath, "assets"))
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 		EncryptedChoice: encryptedVote, // This now contains the VoteEncryptionPackage
 		Nonce:           vote.Nonce,
 		Timestamp:       timestamp,
-		PublicKeyHash:   vs.cryptoService.Keccak256(vs.cryptoService.FromECDSAPub(&privateKey.PublicKey)),
+		PrivateKeyHash:  vs.cryptoService.Keccak256(crypto.FromECDSA(privateKey)),
 	}
 
 	// 5. Sign the encrypted vote
@@ -466,6 +466,7 @@ func (vs *VotingService) processBatchedVotes() error {
 			EncryptedChoice: strippedData,
 			Nonce:           av.Nonce,
 			Timestamp:       ensureUniqueTimestamp(lastTimestamp),
+			PrivateKeyHash:  av.PrivateKeyHash,
 		}
 
 		// Debug log

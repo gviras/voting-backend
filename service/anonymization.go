@@ -68,6 +68,5 @@ func (as *AnonymizationService) AnonymizeVotes(votes []models.Vote) []models.Vot
 
 func (as *AnonymizationService) RemoveVoterSignatures(vote models.Vote) models.Vote {
 	vote.Signature = nil
-	vote.PublicKeyHash = nil
 	return vote
 }

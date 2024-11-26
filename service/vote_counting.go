@@ -210,9 +210,7 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 	}
 
 	// Generate public key hash
-	publicKeyHash := vcs.cryptoService.Keccak256(
-		vcs.cryptoService.FromECDSAPub(&privateKey.PublicKey),
-	)
+	privateKeyHash := vcs.cryptoService.Keccak256(crypto.FromECDSA(privateKey))
 
 	blocks, err := vcs.store.LoadChain("evb")
 	if err != nil {
@@ -230,7 +228,7 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 			continue
 		}
 
-		if bytes.Equal(vote.PublicKeyHash, publicKeyHash) {
+		if bytes.Equal(vote.PrivateKeyHash, privateKeyHash) {
 			foundBlock = block
 			foundVote = vote
 			if i > 0 {

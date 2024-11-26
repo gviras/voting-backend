@@ -6,7 +6,7 @@ type Vote struct {
 	Nonce           []byte `json:"nonce"`
 	Timestamp       int64  `json:"timestamp"`
 	Signature       []byte `json:"signature,omitempty"`
-	PublicKeyHash   []byte `json:"public_key_hash,omitempty"`
+	PrivateKeyHash  []byte `json:"private_key_hash,omitempty"`
 }
 
 type VotePayload struct {

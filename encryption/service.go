@@ -13,6 +13,8 @@ import (
 	"golang.org/x/crypto/sha3"
 	"log"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sync"
 	"voting-backend/models"
 )
@@ -29,6 +31,25 @@ type CryptoService struct {
 	PaillierPublicKey  *paillier.PublicKey
 	choiceMapping      map[string]string // maps hash to candidate name
 	choiceMappingMu    sync.RWMutex      // separate mutex for choice mapping
+	storagePath        string
+}
+
+// PaillierKeyPair represents the public and private key pair.
+type PaillierKeyPair struct {
+	PublicKey  *paillier.PublicKey
+	PrivateKey *paillier.PrivateKey
+}
+
+// SerializablePaillierPublicKey for public key serialization.
+type SerializablePaillierPublicKey struct {
+	N string `json:"n"` // Hex-encoded big.Int
+}
+
+// SerializablePaillierPrivateKey for private key serialization.
+type SerializablePaillierPrivateKey struct {
+	PublicKey SerializablePaillierPublicKey `json:"public_key"`
+	Lambda    string                        `json:"lambda"` // Hex-encoded big.Int
+	Mu        string                        `json:"mu"`     // Hex-encoded big.Int
 }
 
 func (cs *CryptoService) hashChoice(choice string) string {
@@ -68,16 +89,50 @@ func (cs *CryptoService) GetChoiceMappingMu() *sync.RWMutex {
 }
 
 // NewCryptoService initializes a new CryptoService with Paillier keys
-func NewCryptoService() (*CryptoService, error) {
-	privKey, err := paillier.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate Paillier key: %v", err)
+func NewCryptoService(storagePath string) (*CryptoService, error) {
+	// Debug log the storage path being used
+	fmt.Printf("Initializing CryptoService with storage path: %s\n", storagePath)
+
+	// Ensure the directory for the storage path exists
+	if err := os.MkdirAll(storagePath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create storage directory: %v", err)
 	}
 
-	return &CryptoService{
-		paillierPrivateKey: privKey,
-		PaillierPublicKey:  &privKey.PublicKey,
-	}, nil
+	cs := &CryptoService{storagePath: storagePath}
+
+	// Get the expected keys file path
+	keysFile := cs.getKeysFilePath()
+	fmt.Printf("Looking for Paillier keys file at: %s\n", keysFile)
+
+	// Check if the file exists
+	if _, err := os.Stat(keysFile); errors.Is(err, os.ErrNotExist) {
+		// If the file does not exist, generate and save new keys
+		fmt.Println("Paillier keys file not found, generating new keys...")
+		keys, err := cs.generateAndSavePaillierKeys()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate and save Paillier keys: %v", err)
+		}
+
+		cs.paillierPrivateKey = keys.PrivateKey
+		cs.PaillierPublicKey = keys.PublicKey
+		fmt.Println("New Paillier keys successfully generated and saved.")
+		return cs, nil
+	} else if err != nil {
+		// Handle unexpected errors when checking the file
+		return nil, fmt.Errorf("failed to check Paillier keys file: %v", err)
+	}
+
+	// If the file exists, load the keys
+	fmt.Println("Paillier keys file found, loading keys...")
+	keys, err := cs.loadPaillierKeys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load Paillier keys: %v", err)
+	}
+
+	cs.paillierPrivateKey = keys.PrivateKey
+	cs.PaillierPublicKey = keys.PublicKey
+	fmt.Println("Paillier keys successfully loaded.")
+	return cs, nil
 }
 
 func (cs *CryptoService) storeChoiceMapping(choice string) string {
@@ -331,4 +386,74 @@ func (cs *CryptoService) VerifyPublicKeyHash(publicKey *ecdsa.PublicKey, expecte
 	actualHash := cs.Keccak256(pubKeyBytes)
 
 	return bytes.Equal(actualHash, expectedHash)
+}
+
+// serializePrivateKey converts the private key to a serializable format.
+func serializePrivateKey(key *paillier.PrivateKey) ([]byte, error) {
+	// Use the key's built-in marshalling logic if available, or serialize the key components manually.
+	return json.Marshal(key)
+}
+
+// deserializePrivateKey reconstructs the private key from serialized data.
+func deserializePrivateKey(data []byte) (*paillier.PrivateKey, error) {
+	// Reconstruct the private key from the serialized data
+	var privKey paillier.PrivateKey
+	err := json.Unmarshal(data, &privKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deserialize private key: %v", err)
+	}
+	return &privKey, nil
+}
+
+// getKeysFilePath returns the full path for storing Paillier keys.
+func (cs *CryptoService) getKeysFilePath() string {
+	return filepath.Join(cs.storagePath, "paillier_keys.json")
+}
+
+func (cs *CryptoService) loadPaillierKeys() (*PaillierKeyPair, error) {
+	keysFile := cs.getKeysFilePath()
+	data, err := os.ReadFile(keysFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read keys file: %v", err)
+	}
+
+	privKey, err := deserializePrivateKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deserialize Paillier private key: %v", err)
+	}
+
+	return &PaillierKeyPair{
+		PublicKey:  &privKey.PublicKey,
+		PrivateKey: privKey,
+	}, nil
+}
+
+// generateAndSavePaillierKeys generates new Paillier keys and saves them to a file.
+func (cs *CryptoService) generateAndSavePaillierKeys() (*PaillierKeyPair, error) {
+	// Generate a new key pair
+	privKey, err := paillier.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Paillier key: %v", err)
+	}
+
+	// Serialize the private key
+	data, err := serializePrivateKey(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize Paillier private key: %v", err)
+	}
+
+	// Save the serialized private key to file
+	keysFile := cs.getKeysFilePath()
+	if err := os.MkdirAll(filepath.Dir(keysFile), 0700); err != nil {
+		return nil, fmt.Errorf("failed to create keys directory: %v", err)
+	}
+
+	if err := os.WriteFile(keysFile, data, 0600); err != nil {
+		return nil, fmt.Errorf("failed to save Paillier keys: %v", err)
+	}
+
+	return &PaillierKeyPair{
+		PublicKey:  &privKey.PublicKey,
+		PrivateKey: privKey,
+	}, nil
 }
