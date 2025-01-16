@@ -164,7 +164,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	verificationService := NewVoterVerificationService(registry)
 
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(1, 30*time.Minute)
+	anonymizer := NewAnonymizationService(5, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store)
 
 	vs := &VotingService{
