@@ -181,19 +181,6 @@ func (vcs *VoteCountingService) VerifyVoteCount(registeredVoters int) (*VoteVeri
 	}, nil
 }
 
-// verifyVoteSignature verifies the signature of a vote (not needed for homomorphic encryption but kept for completeness)
-func (vcs *VoteCountingService) verifyVoteSignature(vote models.Vote, decryptedVote *models.VotePayload) bool {
-	// Reconstruct the original message that was signed
-	message := vcs.cryptoService.Keccak256(append(vote.EncryptedChoice, vote.Nonce...))
-
-	// Verify the signature
-	return vcs.cryptoService.VerifySignature(
-		message,
-		vote.Signature,
-		&ecdsa.PublicKey{}, // You need to reconstruct the public key from the hash
-	)
-}
-
 func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVerificationResult, error) {
 	vcs.mu.RLock()
 	defer vcs.mu.RUnlock()
