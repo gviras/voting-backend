@@ -36,6 +36,9 @@ type VotingService struct {
 	adminKey             *ecdsa.PrivateKey
 	storagePath          string
 	verificationService  *VoterVerificationService
+	queueProcessor       *QueueProcessor
+	useQueue             bool
+	metricsCollector     *MetricsCollector
 }
 
 type RegisteredVoter struct {
@@ -164,9 +167,11 @@ func NewVotingService(storagePath string, schemeType encryption.SchemeType, keyS
 	// Initialize verification service
 	verificationService := NewVoterVerificationService(registry)
 
+	metricsCollector := NewMetricsCollector()
+
 	session := NewVotingSession(24 * time.Hour)
 	anonymizer := NewAnonymizationService(50, 30*time.Minute)
-	countingService := NewVoteCountingService(cryptoService, store)
+	countingService := NewVoteCountingService(cryptoService, store, metricsCollector)
 
 	vs := &VotingService{
 		store:                store,
@@ -182,13 +187,52 @@ func NewVotingService(storagePath string, schemeType encryption.SchemeType, keyS
 		adminKey:             adminKey,
 		storagePath:          storagePath,
 		verificationService:  verificationService,
+		metricsCollector:     metricsCollector,
+		useQueue:             false, // Default to synchronous processing
 	}
 
 	if err := vs.loadInitialVoters(); err != nil {
 		return nil, err
 	}
 
+	vs.queueProcessor = NewQueueProcessor(vs, 1000, 0)
+
 	return vs, nil
+}
+
+func (vs *VotingService) EnableQueueProcessing(numWorkers int, queueSize int, processingDelay time.Duration) {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	// Stop existing queue processor if running
+	if vs.queueProcessor != nil {
+		vs.queueProcessor.Stop()
+	}
+
+	// Create new queue processor with specified settings
+	vs.queueProcessor = NewQueueProcessor(vs, queueSize, processingDelay)
+	vs.queueProcessor.Start()
+	vs.useQueue = true
+}
+
+func (vs *VotingService) DisableQueueProcessing() {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	if vs.queueProcessor != nil {
+		vs.queueProcessor.Stop()
+	}
+	vs.useQueue = false
+}
+
+func (vs *VotingService) GetQueueProcessor() *QueueProcessor {
+	return vs.queueProcessor
+}
+
+func (vs *VotingService) IsQueueProcessingEnabled() bool {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	return vs.useQueue
 }
 
 // Load initial voters from blockchain
@@ -324,10 +368,19 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 			return fmt.Errorf("failed to process vote batch: %v", err)
 		}
 	}
-
 	return nil
 }
+func (vs *VotingService) GetMetrics() MetricsResponse {
+	return vs.metricsCollector.GetMetrics()
+}
 
+func (vs *VotingService) GetPhaseMetrics(phase string) PhaseMetricsResponse {
+	return vs.metricsCollector.GetPhaseMetrics(phase)
+}
+
+func (vs *VotingService) ResetMetrics() {
+	vs.metricsCollector.Reset()
+}
 func (vs *VotingService) GetFinalResults() (*VotingResults, error) {
 	if vs.votingSession.IsActive() {
 		return nil, errors.New("voting is still active, final results not available")

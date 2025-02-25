@@ -17,11 +17,13 @@ import (
 )
 
 type VoteCountingService struct {
-	cryptoService *encryption.CryptoService
-	store         *storage.JSONStore
-	mu            sync.RWMutex
-	counted       map[string]bool
-	results       map[string]int64 // Changed to int64 for homomorphic counting
+	cryptoService    *encryption.CryptoService
+	store            *storage.JSONStore
+	mu               sync.RWMutex
+	counted          map[string]bool
+	results          map[string]int64  // Changed to int64 for homomorphic counting
+	metricsCollector *MetricsCollector // Add this field
+
 }
 
 type SingleVoteVerification struct {
@@ -46,17 +48,19 @@ type SingleVoteVerificationResult struct {
 	Timestamp       int64    `json:"timestamp"`
 }
 
-func NewVoteCountingService(cryptoService *encryption.CryptoService, store *storage.JSONStore) *VoteCountingService {
+func NewVoteCountingService(cryptoService *encryption.CryptoService, store *storage.JSONStore, metricsCollector *MetricsCollector) *VoteCountingService {
 	return &VoteCountingService{
-		cryptoService: cryptoService,
-		store:         store,
-		counted:       make(map[string]bool),
-		results:       make(map[string]int64),
-	}
+		cryptoService:    cryptoService,
+		store:            store,
+		counted:          make(map[string]bool),
+		results:          make(map[string]int64),
+		metricsCollector: metricsCollector}
 }
 
 // CountVotes counts all votes in the EVB blockchain using homomorphic addition
 func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
+	vcs.metricsCollector.RecordCountingStart()
+
 	vcs.mu.Lock()
 	defer vcs.mu.Unlock()
 
@@ -142,6 +146,8 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 
 		vcs.results[choiceHash] = count
 	}
+
+	vcs.metricsCollector.RecordCountingEnd()
 
 	return &VotingResults{
 		TotalVotes:     len(vcs.counted),

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
 	"log"
-	"math"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +20,27 @@ import (
 	"voting-backend/models"
 	"voting-backend/service"
 )
+
+// AlgorithmPerformanceMetrics tracks detailed metrics about cryptographic operations
+type AlgorithmPerformanceMetrics struct {
+	SchemeDescription   string
+	RegistrationMetrics OperationMetrics
+	VotingMetrics       OperationMetrics
+	CountingMetrics     OperationMetrics
+	TotalProcessingTime time.Duration
+	ResponseTimes       []time.Duration // Client-perceived response times
+	MemoryUsage         uint64
+}
+
+// OperationMetrics stores timing metrics for a specific cryptographic operation
+type OperationMetrics struct {
+	APILatency     time.Duration // Time to get API response (client-perceived)
+	ProcessingTime time.Duration // Actual server processing time
+	Success        int
+	Failure        int
+	ThroughputAPI  float64 // Operations per second (client-perceived)
+	ThroughputProc float64 // Operations per second (actual processing)
+}
 
 type Config struct {
 	StorageDir      string
@@ -121,6 +140,7 @@ func main() {
 	}
 
 	votingService, err := initializeVotingService(config)
+	votingService.EnableQueueProcessing(250, 1000, 0)
 	if err != nil {
 		log.Fatalf("Failed to initialize voting service: %v", err)
 	}
@@ -150,6 +170,11 @@ func main() {
 	http.HandleFunc("/api/blockchain/status", server.handleGetBlockchainStatus)
 	http.HandleFunc("/api/blockchain/reload", server.handleReloadChains)
 
+	//Metrics
+	// Metrics and performance endpoints
+	http.HandleFunc("/api/metrics", server.handleGetMetrics)
+	http.HandleFunc("/api/metrics/reset", server.handleResetMetrics)
+
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -175,72 +200,81 @@ func main() {
 }
 
 func (s *Server) handleRegisterVoter(w http.ResponseWriter, r *http.Request) {
-	// Retry configuration
-	maxRetries := 3
-	backoffBase := 50 * time.Millisecond
+	var req RegisterVoterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Existing registration logic
-		var req RegisterVoterRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+	// Validation steps remain the same
+	if err := validateRegistrationRequest(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Parse date
+	dateOfBirth, err := time.Parse("2006-01-02", req.DateOfBirth)
+	if err != nil {
+		http.Error(w, "Invalid date format. Use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	// Create VoterIdentity
+	voterIdentity := &models.VoterIdentity{
+		PersonalCode: req.PersonalCode,
+		FirstName:    req.FirstName,
+		LastName:     req.LastName,
+		DateOfBirth:  dateOfBirth,
+		Citizenship:  req.Citizenship,
+		Address:      req.Address,
+	}
+
+	// Check if queue processing is enabled
+	if s.votingService.IsQueueProcessingEnabled() {
+		// Queue the registration request
+		resultCh := s.votingService.GetQueueProcessor().QueueRegistration(voterIdentity)
+
+		// Wait for result
+		result := <-resultCh
+
+		if !result.Success {
+			http.Error(w, result.ErrorMessage, http.StatusBadRequest)
 			return
 		}
 
-		// Validation steps remain the same
-		if err := validateRegistrationRequest(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		// Format and return response
+		privKeyBytes := crypto.FromECDSA(result.PrivateKey)
+		pubKeyBytes := crypto.FromECDSAPub(&result.PrivateKey.PublicKey)
+
+		response := RegisterVoterResponse{
+			VoterID:    result.VoterID,
+			PublicKey:  hex.EncodeToString(pubKeyBytes),
+			PrivateKey: hex.EncodeToString(privKeyBytes),
 		}
 
-		// Parse date
-		dateOfBirth, err := time.Parse("2006-01-02", req.DateOfBirth)
-		if err != nil {
-			http.Error(w, "Invalid date format. Use YYYY-MM-DD", http.StatusBadRequest)
-			return
-		}
-
-		// Create VoterIdentity
-		voterIdentity := &models.VoterIdentity{
-			PersonalCode: req.PersonalCode,
-			FirstName:    req.FirstName,
-			LastName:     req.LastName,
-			DateOfBirth:  dateOfBirth,
-			Citizenship:  req.Citizenship,
-			Address:      req.Address,
-		}
-
-		// Attempt registration
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	} else {
+		// Synchronous processing (original code)
 		registeredVoter, err := s.votingService.RegisterVoter(voterIdentity)
-		if err == nil {
-			// Success, format and return response
-			privKeyBytes := crypto.FromECDSA(registeredVoter.PrivateKey)
-			pubKeyBytes := crypto.FromECDSAPub(&registeredVoter.PrivateKey.PublicKey)
-
-			response := RegisterVoterResponse{
-				VoterID:    registeredVoter.VoterID,
-				PublicKey:  hex.EncodeToString(pubKeyBytes),
-				PrivateKey: hex.EncodeToString(privKeyBytes),
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(response)
-			return
-		}
-
-		// Log the error
-		log.Printf("Registration attempt %d failed: %v", attempt+1, err)
-
-		// Check if it's the last attempt
-		if attempt == maxRetries-1 {
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		// Exponential backoff with jitter
-		backoffDuration := backoffBase * time.Duration(math.Pow(2, float64(attempt)))
-		jitter := time.Duration(rand.Float64() * float64(backoffDuration) * 0.5)
-		time.Sleep(backoffDuration + jitter)
+		privKeyBytes := crypto.FromECDSA(registeredVoter.PrivateKey)
+		pubKeyBytes := crypto.FromECDSAPub(&registeredVoter.PrivateKey.PublicKey)
+
+		response := RegisterVoterResponse{
+			VoterID:    registeredVoter.VoterID,
+			PublicKey:  hex.EncodeToString(pubKeyBytes),
+			PrivateKey: hex.EncodeToString(privKeyBytes),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 }
 
@@ -331,15 +365,30 @@ func (s *Server) handleCastVote(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Processing vote for candidate: %s\n", req.Candidate)
 
-	if err := s.votingService.CastVote(req.VoterID, vote, privateKey); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	// Check if queue processing is enabled
+	if s.votingService.IsQueueProcessingEnabled() {
+		// Queue the vote request but don't wait for the result
+		// Just put it in the queue and respond immediately
+		s.votingService.GetQueueProcessor().QueueVoteNoWait(req.VoterID, vote, privateKey)
+
+		fmt.Println("Vote successfully queued for processing")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		return
+	} else {
+		// Synchronous processing (original code)
+		if err := s.votingService.CastVote(req.VoterID, vote, privateKey); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		fmt.Println("Vote successfully cast and saved")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"success": true})
 		return
 	}
-
-	fmt.Println("Vote successfully cast and saved")
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 // New endpoint to count votes
@@ -488,7 +537,7 @@ func initializeVotingService(config *Config) (*service.VotingService, error) {
 		return nil, err
 	}
 
-	return service.NewVotingService(absPath, encryption.SchemeElGamal, 1024)
+	return service.NewVotingService(absPath, encryption.SchemePaillier, 2048)
 }
 
 func (s *Server) handleGetAdminCredentials(w http.ResponseWriter, r *http.Request) {
@@ -817,4 +866,37 @@ func (s *Server) handleGetFinalResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get phase-specific metrics if requested
+	phase := r.URL.Query().Get("phase")
+	if phase != "" {
+		phaseMetrics := s.votingService.GetPhaseMetrics(phase)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(phaseMetrics)
+		return
+	}
+
+	// Get all metrics
+	metrics := s.votingService.GetMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleResetMetrics resets all performance metrics
+func (s *Server) handleResetMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.votingService.ResetMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
