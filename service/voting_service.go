@@ -117,7 +117,7 @@ func loadOrGenerateAdminKey(storagePath string) (*ecdsa.PrivateKey, error) {
 
 // Constructor
 // Constructor
-func NewVotingService(storagePath string) (*VotingService, error) {
+func NewVotingService(storagePath string, schemeType encryption.SchemeType, keySize int) (*VotingService, error) {
 	store, err := storage.NewJSONStore(storagePath)
 	if err != nil {
 		return nil, err
@@ -140,10 +140,11 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	}
 
 	// Initialize services
-	cryptoService, err := encryption.NewCryptoService(filepath.Join(storagePath, "assets"))
-	if err != nil {
-		return nil, err
-	}
+	cryptoService, err := encryption.NewCryptoServiceWithScheme(
+		filepath.Join(storagePath, "assets"),
+		schemeType,
+		keySize,
+	)
 
 	// Initialize mock registry with configuration
 	registryConfig := officialRegistryMock.RegistryConfig{
@@ -164,7 +165,7 @@ func NewVotingService(storagePath string) (*VotingService, error) {
 	verificationService := NewVoterVerificationService(registry)
 
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(3, 30*time.Minute)
+	anonymizer := NewAnonymizationService(50, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store)
 
 	vs := &VotingService{
@@ -337,9 +338,6 @@ func (vs *VotingService) GetFinalResults() (*VotingResults, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Debug: Dump the current mappings
-	vs.cryptoService.DumpChoiceMapping()
 
 	// Create new results with revealed choices
 	revealedResults := make(map[string]int64)

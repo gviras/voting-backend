@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,14 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 	vcs.mu.Lock()
 	defer vcs.mu.Unlock()
 
+	// Recover from any panics that might occur
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic in vote counting: %v\n", r)
+			debug.PrintStack()
+		}
+	}()
+
 	vcs.counted = make(map[string]bool)
 	vcs.results = make(map[string]int64)
 
@@ -70,11 +79,12 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 	fmt.Printf("Starting homomorphic vote count. Found %d blocks\n", len(blocks))
 
 	// Track encrypted sums by choice hash
-	var currentSum []byte
+	sumsByChoice := make(map[string][]byte)
 
 	for _, block := range blocks {
 		var vote models.Vote
 		if err := json.Unmarshal(block.Data, &vote); err != nil {
+			fmt.Printf("Failed to unmarshal vote data: %v\n", err)
 			continue
 		}
 
@@ -82,36 +92,60 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 			continue
 		}
 
-		// Add to running sum
-		if currentSum == nil {
-			currentSum = vote.EncryptedChoice
-		} else {
-			summedVote, err := vcs.cryptoService.AddEncryptedVotes(currentSum, vote.EncryptedChoice)
-			if err != nil {
+		// Skip votes with empty encrypted choice
+		if vote.EncryptedChoice == nil || len(vote.EncryptedChoice) == 0 {
+			fmt.Printf("Skipping vote with empty encrypted choice: %s\n", vote.ID)
+			continue
+		}
+
+		// Parse the vote package to get choice-specific data
+		var votePackage encryption.VoteEncryptionPackage
+		if err := json.Unmarshal(vote.EncryptedChoice, &votePackage); err != nil {
+			fmt.Printf("Failed to unmarshal vote package: %v\n", err)
+			continue
+		}
+
+		// Process each choice in the vote
+		for choiceHash, encryptedChoice := range votePackage.HomomorphicVoteData {
+			if encryptedChoice == nil || len(encryptedChoice) == 0 {
 				continue
 			}
-			currentSum = summedVote
+
+			if existing, exists := sumsByChoice[choiceHash]; exists {
+				// Add this vote to the existing sum for this choice
+				summed, err := vcs.cryptoService.AddHomomorphicValues(existing, encryptedChoice)
+				if err != nil {
+					fmt.Printf("Failed to add vote for choice %s: %v\n", choiceHash, err)
+					continue
+				}
+				sumsByChoice[choiceHash] = summed
+			} else {
+				// First vote for this choice
+				sumsByChoice[choiceHash] = encryptedChoice
+			}
 		}
 
 		vcs.counted[vote.ID] = true
 	}
 
-	// Decrypt final sums
-	if currentSum != nil {
-		decryptedData, err := vcs.cryptoService.DecryptVoteData(currentSum)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt final tally: %v", err)
+	// Decrypt final sums for each choice separately
+	for choiceHash, encryptedSum := range sumsByChoice {
+		if encryptedSum == nil {
+			continue
 		}
 
-		// Results are now mapped by choice hash
-		if err := json.Unmarshal(decryptedData, &vcs.results); err != nil {
-			return nil, fmt.Errorf("failed to parse results: %v", err)
+		count, err := vcs.cryptoService.DecryptToInt(encryptedSum)
+		if err != nil {
+			fmt.Printf("Failed to decrypt sum for choice %s: %v\n", choiceHash, err)
+			continue
 		}
+
+		vcs.results[choiceHash] = count
 	}
 
 	return &VotingResults{
 		TotalVotes:     len(vcs.counted),
-		Results:        vcs.results, // Results are now mapped by choice hash
+		Results:        vcs.results,
 		ProcessedVotes: len(blocks),
 	}, nil
 }

@@ -146,9 +146,9 @@ func (vvs *VoterVerificationService) verifyIdentityMatch(identity *models.VoterI
 	if identity.LastName != registryVoter.LastName {
 		return errors.New("last name mismatch with registry")
 	}
-	if !identity.DateOfBirth.Equal(registryVoter.DateOfBirth) {
-		return errors.New("birth date mismatch with registry")
-	}
+	//if !identity.DateOfBirth.Equal(registryVoter.DateOfBirth) {
+	//	return errors.New("birth date mismatch with registry")
+	//}
 	if identity.Citizenship != registryVoter.Citizenship {
 		return errors.New("citizenship mismatch with registry")
 	}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
 	"log"
+	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"voting-backend/encryption"
 	"voting-backend/models"
 	"voting-backend/service"
 )
@@ -172,72 +175,73 @@ func main() {
 }
 
 func (s *Server) handleRegisterVoter(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+	// Retry configuration
+	maxRetries := 3
+	backoffBase := 50 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Existing registration logic
+		var req RegisterVoterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validation steps remain the same
+		if err := validateRegistrationRequest(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Parse date
+		dateOfBirth, err := time.Parse("2006-01-02", req.DateOfBirth)
+		if err != nil {
+			http.Error(w, "Invalid date format. Use YYYY-MM-DD", http.StatusBadRequest)
+			return
+		}
+
+		// Create VoterIdentity
+		voterIdentity := &models.VoterIdentity{
+			PersonalCode: req.PersonalCode,
+			FirstName:    req.FirstName,
+			LastName:     req.LastName,
+			DateOfBirth:  dateOfBirth,
+			Citizenship:  req.Citizenship,
+			Address:      req.Address,
+		}
+
+		// Attempt registration
+		registeredVoter, err := s.votingService.RegisterVoter(voterIdentity)
+		if err == nil {
+			// Success, format and return response
+			privKeyBytes := crypto.FromECDSA(registeredVoter.PrivateKey)
+			pubKeyBytes := crypto.FromECDSAPub(&registeredVoter.PrivateKey.PublicKey)
+
+			response := RegisterVoterResponse{
+				VoterID:    registeredVoter.VoterID,
+				PublicKey:  hex.EncodeToString(pubKeyBytes),
+				PrivateKey: hex.EncodeToString(privKeyBytes),
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		// Log the error
+		log.Printf("Registration attempt %d failed: %v", attempt+1, err)
+
+		// Check if it's the last attempt
+		if attempt == maxRetries-1 {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Exponential backoff with jitter
+		backoffDuration := backoffBase * time.Duration(math.Pow(2, float64(attempt)))
+		jitter := time.Duration(rand.Float64() * float64(backoffDuration) * 0.5)
+		time.Sleep(backoffDuration + jitter)
 	}
-
-	// Enable CORS for development
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	// Handle preflight
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	var req RegisterVoterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	println("Received registration request for voter: ", req.PersonalCode)
-	// Validate required fields
-	if err := validateRegistrationRequest(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Parse date string to time.Time
-	dateOfBirth, err := time.Parse("2006-01-02", req.DateOfBirth)
-	if err != nil {
-		http.Error(w, "Invalid date format. Use YYYY-MM-DD", http.StatusBadRequest)
-		return
-	}
-
-	// Create VoterIdentity from request
-	voterIdentity := &models.VoterIdentity{
-		PersonalCode: req.PersonalCode,
-		FirstName:    req.FirstName,
-		LastName:     req.LastName,
-		DateOfBirth:  dateOfBirth,
-		Citizenship:  req.Citizenship,
-		Address:      req.Address,
-	}
-
-	// Register voter using the voting service
-	registeredVoter, err := s.votingService.RegisterVoter(voterIdentity)
-	if err != nil {
-		// Log the error for debugging
-		log.Printf("Voter registration failed: %v", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Format keys as hex strings
-	privKeyBytes := crypto.FromECDSA(registeredVoter.PrivateKey)
-	pubKeyBytes := crypto.FromECDSAPub(&registeredVoter.PrivateKey.PublicKey)
-
-	response := RegisterVoterResponse{
-		VoterID:    registeredVoter.VoterID, // Using personal code as voter ID
-		PublicKey:  hex.EncodeToString(pubKeyBytes),
-		PrivateKey: hex.EncodeToString(privKeyBytes),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
 }
 
 func validateRegistrationRequest(req *RegisterVoterRequest) error {
@@ -453,7 +457,7 @@ func parseFlags() *Config {
 
 	flag.StringVar(&config.StorageDir, "storage", "data", "Directory for blockchain storage")
 	flag.DurationVar(&config.SessionDuration, "session", 24*time.Hour, "Voting session duration")
-	flag.IntVar(&config.BatchSize, "batch", 10, "Vote batch size for anonymization")
+	flag.IntVar(&config.BatchSize, "batch", 9, "Vote batch size for anonymization")
 	flag.DurationVar(&config.MixWindow, "mixwindow", 30*time.Minute, "Time window for vote mixing")
 	flag.IntVar(&config.Port, "port", 8080, "Server port")
 
@@ -484,7 +488,7 @@ func initializeVotingService(config *Config) (*service.VotingService, error) {
 		return nil, err
 	}
 
-	return service.NewVotingService(absPath)
+	return service.NewVotingService(absPath, encryption.SchemeElGamal, 1024)
 }
 
 func (s *Server) handleGetAdminCredentials(w http.ResponseWriter, r *http.Request) {
