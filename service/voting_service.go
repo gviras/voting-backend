@@ -170,7 +170,7 @@ func NewVotingService(storagePath string, schemeType encryption.SchemeType, keyS
 	metricsCollector := NewMetricsCollector()
 
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(50, 30*time.Minute)
+	anonymizer := NewAnonymizationService(100, 30*time.Minute)
 	countingService := NewVoteCountingService(cryptoService, store, metricsCollector)
 
 	vs := &VotingService{
