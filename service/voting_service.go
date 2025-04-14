@@ -38,7 +38,7 @@ type VotingService struct {
 	verificationService  *VoterVerificationService
 	queueProcessor       *QueueProcessor
 	useQueue             bool
-	metricsCollector     *MetricsCollector
+	MetricsCollector     *MetricsCollector
 }
 
 type RegisteredVoter struct {
@@ -187,7 +187,7 @@ func NewVotingService(storagePath string, schemeType encryption.SchemeType, keyS
 		adminKey:             adminKey,
 		storagePath:          storagePath,
 		verificationService:  verificationService,
-		metricsCollector:     metricsCollector,
+		MetricsCollector:     metricsCollector,
 		useQueue:             false, // Default to synchronous processing
 	}
 
@@ -318,6 +318,9 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
+	vs.MetricsCollector.RecordVotingStart()
+	startTime := time.Now()
+
 	// 1. Check voting session and voter verification
 	if !vs.votingSession.IsActive() {
 		return errors.New("voting session has ended")
@@ -368,18 +371,23 @@ func (vs *VotingService) CastVote(voterID string, vote *models.VotePayload, priv
 			return fmt.Errorf("failed to process vote batch: %v", err)
 		}
 	}
+
+	processingTime := time.Since(startTime)
+	// Log the processing time for debugging
+	fmt.Printf("Vote processing time: %v nanoseconds\n", processingTime.Nanoseconds())
+	vs.MetricsCollector.RecordVotingEnd(processingTime)
 	return nil
 }
 func (vs *VotingService) GetMetrics() MetricsResponse {
-	return vs.metricsCollector.GetMetrics()
+	return vs.MetricsCollector.GetMetrics()
 }
 
 func (vs *VotingService) GetPhaseMetrics(phase string) PhaseMetricsResponse {
-	return vs.metricsCollector.GetPhaseMetrics(phase)
+	return vs.MetricsCollector.GetPhaseMetrics(phase)
 }
 
 func (vs *VotingService) ResetMetrics() {
-	vs.metricsCollector.Reset()
+	vs.MetricsCollector.Reset()
 }
 func (vs *VotingService) GetFinalResults() (*VotingResults, error) {
 	if vs.votingSession.IsActive() {
@@ -572,9 +580,9 @@ func (vs *VotingService) ReloadChains() error {
 	}
 
 	//// Validate DKB chain
-	//if !models.ValidateChain(dkbBlocks) {
-	//	return fmt.Errorf("reloaded DKB chain is invalid")
-	//}
+	if !models.ValidateChain(dkbBlocks) {
+		return fmt.Errorf("reloaded DKB chain is invalid")
+	}
 	vs.dkbBlocks = dkbBlocks
 
 	// Reload EVB chain
@@ -584,9 +592,9 @@ func (vs *VotingService) ReloadChains() error {
 	}
 
 	//// Validate EVB chain
-	//if !models.ValidateChain(evbBlocks) {
-	//	return fmt.Errorf("reloaded EVB chain is invalid")
-	//}
+	if !models.ValidateChain(evbBlocks) {
+		return fmt.Errorf("reloaded EVB chain is invalid")
+	}
 	vs.evbBlocks = evbBlocks
 
 	// Rebuild the registered voters map from DKB

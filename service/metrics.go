@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -18,6 +19,11 @@ type MetricsCollector struct {
 	votingCount     int
 	votingTotalTime time.Duration
 
+	votingPhaseStarted   bool
+	votingPhaseStartTime time.Time
+	votingPhaseEndTime   time.Time
+	votingPhaseDuration  time.Duration
+
 	countingStartTime      time.Time
 	countingEndTime        time.Time
 	countingProcessingTime time.Duration
@@ -25,10 +31,10 @@ type MetricsCollector struct {
 
 // OperationMetrics contains timing information for an operation
 type OperationMetrics struct {
-	StartTime      time.Time     `json:"start_time"`
-	EndTime        time.Time     `json:"end_time"`
-	Count          int           `json:"count"`
-	ProcessingTime time.Duration `json:"processing_time_ms"`
+	StartTime      time.Time `json:"start_time"`
+	EndTime        time.Time `json:"end_time"`
+	Count          int       `json:"count"`
+	ProcessingTime int64     `json:"processing_time_ms"`
 }
 
 // MetricsResponse provides the metrics for all operations
@@ -41,6 +47,25 @@ type MetricsResponse struct {
 // NewMetricsCollector creates a new metrics collector
 func NewMetricsCollector() *MetricsCollector {
 	return &MetricsCollector{}
+}
+
+// Add new methods
+func (mc *MetricsCollector) StartVotingPhase() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.votingPhaseStarted = true
+	mc.votingPhaseStartTime = time.Now()
+}
+
+func (mc *MetricsCollector) EndVotingPhase() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if mc.votingPhaseStarted {
+		mc.votingPhaseEndTime = time.Now()
+		mc.votingPhaseDuration = mc.votingPhaseEndTime.Sub(mc.votingPhaseStartTime)
+	}
 }
 
 // RecordRegistrationStart marks the start of a registration operation
@@ -80,7 +105,11 @@ func (mc *MetricsCollector) RecordVotingEnd(duration time.Duration) {
 	defer mc.mu.Unlock()
 
 	mc.votingEndTime = time.Now()
+	fmt.Printf("Adding duration: %v ns, current total: %v ns\n",
+		duration.Nanoseconds(), mc.votingTotalTime.Nanoseconds())
 	mc.votingTotalTime += duration
+	fmt.Printf("New total: %v ns (%v ms)\n",
+		mc.votingTotalTime.Nanoseconds(), mc.votingTotalTime.Milliseconds())
 }
 
 // RecordCountingStart marks the start of a counting operation
@@ -110,26 +139,29 @@ func (mc *MetricsCollector) GetMetrics() MetricsResponse {
 			StartTime:      mc.registrationStartTime,
 			EndTime:        mc.registrationEndTime,
 			Count:          mc.registrationCount,
-			ProcessingTime: mc.registrationTotalTime,
+			ProcessingTime: mc.registrationTotalTime.Milliseconds(),
 		},
 		Voting: OperationMetrics{
 			StartTime:      mc.votingStartTime,
 			EndTime:        mc.votingEndTime,
 			Count:          mc.votingCount,
-			ProcessingTime: mc.votingTotalTime,
+			ProcessingTime: mc.votingTotalTime.Milliseconds(),
 		},
 		Counting: OperationMetrics{
 			StartTime:      mc.countingStartTime,
 			EndTime:        mc.countingEndTime,
-			ProcessingTime: mc.countingProcessingTime,
+			ProcessingTime: mc.countingProcessingTime.Milliseconds(),
 		},
 	}
 }
 
 // GetPhaseMetrics returns metrics for a specific phase
 type PhaseMetricsResponse struct {
-	ProcessingTimeMs int64 `json:"processing_time_ms"`
-	Count            int   `json:"count"`
+	ProcessingTimeMs int64     `json:"processing_time_ms"`
+	Count            int       `json:"count"`
+	PhaseStartTime   time.Time `json:"phase_start_time,omitempty"`
+	PhaseEndTime     time.Time `json:"phase_end_time,omitempty"`
+	PhaseDuration    int64     `json:"phase_duration_ms,omitempty"`
 }
 
 func (mc *MetricsCollector) GetPhaseMetrics(phase string) PhaseMetricsResponse {
@@ -146,6 +178,9 @@ func (mc *MetricsCollector) GetPhaseMetrics(phase string) PhaseMetricsResponse {
 		return PhaseMetricsResponse{
 			ProcessingTimeMs: mc.votingTotalTime.Milliseconds(),
 			Count:            mc.votingCount,
+			PhaseStartTime:   mc.votingPhaseStartTime,
+			PhaseEndTime:     mc.votingPhaseEndTime,
+			PhaseDuration:    mc.votingPhaseDuration.Milliseconds(),
 		}
 	case "counting":
 		return PhaseMetricsResponse{

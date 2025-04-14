@@ -170,6 +170,9 @@ func main() {
 	http.HandleFunc("/api/blockchain/status", server.handleGetBlockchainStatus)
 	http.HandleFunc("/api/blockchain/reload", server.handleReloadChains)
 
+	http.HandleFunc("/api/phases/voting/start", server.handleStartVotingPhase)
+	http.HandleFunc("/api/phases/voting/end", server.handleEndVotingPhase)
+
 	//Metrics
 	// Metrics and performance endpoints
 	http.HandleFunc("/api/metrics", server.handleGetMetrics)
@@ -537,11 +540,11 @@ func initializeVotingService(config *Config) (*service.VotingService, error) {
 		return nil, err
 	}
 
-	//return service.NewVotingService(absPath, encryption.SchemeElGamal, 256)
+	return service.NewVotingService(absPath, encryption.SchemeElGamal, 256)
 	//return service.NewVotingService(absPath, encryption.SchemeElGamal, 384)
 	//return service.NewVotingService(absPath, encryption.SchemeElGamal, 521)
 
-	return service.NewVotingService(absPath, encryption.SchemePaillier, 2048)
+	//return service.NewVotingService(absPath, encryption.SchemePaillier, 2048)
 	//return service.NewVotingService(absPath, encryption.SchemePaillier, 3072)
 	//return service.NewVotingService(absPath, encryption.SchemePaillier, 4096)
 }
@@ -903,6 +906,30 @@ func (s *Server) handleResetMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.votingService.ResetMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (s *Server) handleStartVotingPhase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.votingService.MetricsCollector.StartVotingPhase()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (s *Server) handleEndVotingPhase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.votingService.MetricsCollector.EndVotingPhase()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

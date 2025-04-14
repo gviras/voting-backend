@@ -150,7 +150,7 @@ func (qp *QueueProcessor) registrationWorker() {
 			}
 
 			// Start recording metrics
-			qp.votingService.metricsCollector.RecordRegistrationStart()
+			qp.votingService.MetricsCollector.RecordRegistrationStart()
 			startTime := time.Now()
 
 			// Process registration
@@ -158,7 +158,7 @@ func (qp *QueueProcessor) registrationWorker() {
 
 			// Complete recording metrics
 			processingTime := time.Since(startTime)
-			qp.votingService.metricsCollector.RecordRegistrationEnd(processingTime)
+			qp.votingService.MetricsCollector.RecordRegistrationEnd(processingTime)
 
 			if err != nil {
 				req.ResultCh <- &ProcessingResult{
@@ -192,7 +192,7 @@ func (qp *QueueProcessor) voteWorker() {
 			}
 
 			// Start recording metrics
-			qp.votingService.metricsCollector.RecordVotingStart()
+			qp.votingService.MetricsCollector.RecordVotingStart()
 			startTime := time.Now()
 
 			// Process vote
@@ -200,7 +200,7 @@ func (qp *QueueProcessor) voteWorker() {
 
 			// Complete recording metrics
 			processingTime := time.Since(startTime)
-			qp.votingService.metricsCollector.RecordVotingEnd(processingTime)
+			qp.votingService.MetricsCollector.RecordVotingEnd(processingTime)
 
 			if err != nil {
 				req.ResultCh <- &ProcessingResult{
