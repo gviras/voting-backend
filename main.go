@@ -540,11 +540,11 @@ func initializeVotingService(config *Config) (*service.VotingService, error) {
 		return nil, err
 	}
 
-	return service.NewVotingService(absPath, encryption.SchemeElGamal, 256)
+	//return service.NewVotingService(absPath, encryption.SchemeElGamal, 256)
 	//return service.NewVotingService(absPath, encryption.SchemeElGamal, 384)
 	//return service.NewVotingService(absPath, encryption.SchemeElGamal, 521)
 
-	//return service.NewVotingService(absPath, encryption.SchemePaillier, 2048)
+	return service.NewVotingService(absPath, encryption.SchemePaillier, 2048)
 	//return service.NewVotingService(absPath, encryption.SchemePaillier, 3072)
 	//return service.NewVotingService(absPath, encryption.SchemePaillier, 4096)
 }

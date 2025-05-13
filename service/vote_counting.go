@@ -10,20 +10,21 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"time"
 	"voting-backend/encryption"
 	"voting-backend/models"
 	"voting-backend/storage"
 )
 
 type VoteCountingService struct {
-	cryptoService    *encryption.CryptoService
-	store            *storage.JSONStore
-	mu               sync.RWMutex
-	counted          map[string]bool
-	results          map[string]int64  // Changed to int64 for homomorphic counting
-	metricsCollector *MetricsCollector // Add this field
-
+	cryptoService      *encryption.CryptoService
+	store              *storage.JSONStore
+	mu                 sync.RWMutex
+	counted            map[string]bool
+	results            map[string]int64 // Final decrypted results
+	encryptedVectorSum [][]byte         // Encrypted vote sum vector
+	metricsCollector   *MetricsCollector
+	isVotingActiveFunc func() bool
+	resultsCounted     bool // Flag to indicate if votes have been counted
 }
 
 type SingleVoteVerification struct {
@@ -40,7 +41,6 @@ type SingleVoteVerificationResult struct {
 	BlockIndex      uint64   `json:"block_index"`
 	IsValid         bool     `json:"is_valid"`
 	BlockValid      bool     `json:"block_valid"`
-	TimestampValid  bool     `json:"timestamp_valid"`
 	ChainLinkValid  bool     `json:"chain_link_valid"`
 	EncryptionValid bool     `json:"encryption_valid"`
 	NonceValid      bool     `json:"nonce_valid"`
@@ -48,13 +48,20 @@ type SingleVoteVerificationResult struct {
 	Timestamp       int64    `json:"timestamp"`
 }
 
-func NewVoteCountingService(cryptoService *encryption.CryptoService, store *storage.JSONStore, metricsCollector *MetricsCollector) *VoteCountingService {
+func NewVoteCountingService(
+	cryptoService *encryption.CryptoService,
+	store *storage.JSONStore,
+	metricsCollector *MetricsCollector,
+	isVotingActiveFunc func() bool,
+) *VoteCountingService {
 	return &VoteCountingService{
-		cryptoService:    cryptoService,
-		store:            store,
-		counted:          make(map[string]bool),
-		results:          make(map[string]int64),
-		metricsCollector: metricsCollector}
+		cryptoService:      cryptoService,
+		store:              store,
+		counted:            make(map[string]bool),
+		results:            make(map[string]int64),
+		metricsCollector:   metricsCollector,
+		isVotingActiveFunc: isVotingActiveFunc,
+	}
 }
 
 // CountVotes counts all votes in the EVB blockchain using homomorphic addition
@@ -72,7 +79,9 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 		}
 	}()
 
+	// Clear previous results
 	vcs.counted = make(map[string]bool)
+	vcs.encryptedVectorSum = nil
 	vcs.results = make(map[string]int64)
 
 	blocks, err := vcs.store.LoadChain("evb")
@@ -82,8 +91,14 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 
 	fmt.Printf("Starting homomorphic vote count. Found %d blocks\n", len(blocks))
 
-	// Track encrypted sums by choice hash
-	sumsByChoice := make(map[string][]byte)
+	// Get registry to determine vector size
+	registry, err := vcs.cryptoService.GetOrCreateCandidateRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get candidate registry: %w", err)
+	}
+
+	// Initialize the vote sum vector with the correct size
+	vectorSum := make([][]byte, len(registry.Candidates))
 
 	for _, block := range blocks {
 		var vote models.Vote
@@ -102,57 +117,133 @@ func (vcs *VoteCountingService) CountVotes() (*VotingResults, error) {
 			continue
 		}
 
-		// Parse the vote package to get choice-specific data
+		// Parse the vote package
 		var votePackage encryption.VoteEncryptionPackage
 		if err := json.Unmarshal(vote.EncryptedChoice, &votePackage); err != nil {
 			fmt.Printf("Failed to unmarshal vote package: %v\n", err)
 			continue
 		}
 
-		// Process each choice in the vote
-		for choiceHash, encryptedChoice := range votePackage.HomomorphicVoteData {
-			if encryptedChoice == nil || len(encryptedChoice) == 0 {
+		// Process vector-based vote
+		if votePackage.EncryptedVoteVector == nil || len(votePackage.EncryptedVoteVector) == 0 {
+			fmt.Printf("Vote %s does not contain a valid vote vector, skipping\n", vote.ID)
+			continue
+		}
+
+		// Ensure vector length matches registry
+		if len(votePackage.EncryptedVoteVector) != len(registry.Candidates) {
+			fmt.Printf("Warning: vote %s has incorrect vector length (%d vs %d), skipping\n",
+				vote.ID, len(votePackage.EncryptedVoteVector), len(registry.Candidates))
+			continue
+		}
+
+		// Add this vote to the running sum
+		for i, encrypted := range votePackage.EncryptedVoteVector {
+			if encrypted == nil {
 				continue
 			}
 
-			if existing, exists := sumsByChoice[choiceHash]; exists {
-				// Add this vote to the existing sum for this choice
-				summed, err := vcs.cryptoService.AddHomomorphicValues(existing, encryptedChoice)
+			if vectorSum[i] == nil {
+				vectorSum[i] = encrypted
+			} else {
+				summed, err := vcs.cryptoService.AddHomomorphicValues(vectorSum[i], encrypted)
 				if err != nil {
-					fmt.Printf("Failed to add vote for choice %s: %v\n", choiceHash, err)
+					fmt.Printf("Failed to add vote vector element %d: %v\n", i, err)
 					continue
 				}
-				sumsByChoice[choiceHash] = summed
-			} else {
-				// First vote for this choice
-				sumsByChoice[choiceHash] = encryptedChoice
+				vectorSum[i] = summed
 			}
 		}
 
 		vcs.counted[vote.ID] = true
 	}
 
-	// Decrypt final sums for each choice separately
-	for choiceHash, encryptedSum := range sumsByChoice {
+	// Store the encrypted sum but don't decrypt it
+	vcs.encryptedVectorSum = vectorSum
+	vcs.resultsCounted = true
+
+	vcs.metricsCollector.RecordCountingEnd()
+
+	// Return a result with just the count of votes, no decrypted results yet
+	return &VotingResults{
+		TotalVotes:     len(vcs.counted),
+		ProcessedVotes: len(blocks),
+		Results:        make(map[string]int64), // Empty results
+	}, nil
+}
+
+func (vcs *VoteCountingService) GetFinalResults() (*VotingResults, error) {
+	// Check if voting has ended
+	if vcs.isVotingActiveFunc != nil && vcs.isVotingActiveFunc() {
+		return nil, fmt.Errorf("cannot retrieve final results while voting is still active")
+	}
+
+	vcs.mu.Lock()
+	defer vcs.mu.Unlock()
+
+	// If votes haven't been counted yet, count them first
+	if !vcs.resultsCounted {
+		vcs.mu.Unlock() // Unlock before calling CountVotes
+		if _, err := vcs.CountVotes(); err != nil {
+			return nil, fmt.Errorf("failed to count votes: %w", err)
+		}
+		vcs.mu.Lock() // Lock again
+	}
+
+	// If results are already decrypted, return them
+	if len(vcs.results) > 0 {
+		return &VotingResults{
+			TotalVotes:     len(vcs.counted),
+			Results:        vcs.results,
+			ProcessedVotes: len(vcs.counted),
+		}, nil
+	}
+
+	// No encrypted vector sum to decrypt
+	if vcs.encryptedVectorSum == nil || len(vcs.encryptedVectorSum) == 0 {
+		return &VotingResults{
+			TotalVotes:     len(vcs.counted),
+			Results:        make(map[string]int64),
+			ProcessedVotes: len(vcs.counted),
+		}, nil
+	}
+
+	// Get the candidate registry
+	registry, err := vcs.cryptoService.GetOrCreateCandidateRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get candidate registry: %w", err)
+	}
+
+	// Decrypt the vector sum
+	results := make(map[string]int64)
+
+	for i, encryptedSum := range vcs.encryptedVectorSum {
 		if encryptedSum == nil {
 			continue
 		}
 
 		count, err := vcs.cryptoService.DecryptToInt(encryptedSum)
 		if err != nil {
-			fmt.Printf("Failed to decrypt sum for choice %s: %v\n", choiceHash, err)
+			fmt.Printf("Failed to decrypt sum for vector element %d: %v\n", i, err)
 			continue
 		}
 
-		vcs.results[choiceHash] = count
+		// Use candidate name from registry
+		candidateName := fmt.Sprintf("Candidate %d", i+1) // Default fallback
+		if i < len(registry.Candidates) {
+			candidateName = registry.Candidates[i]
+		}
+
+		results[candidateName] = count
 	}
 
-	vcs.metricsCollector.RecordCountingEnd()
+	// Store the decrypted results
+	vcs.results = results
 
 	return &VotingResults{
 		TotalVotes:     len(vcs.counted),
-		Results:        vcs.results,
-		ProcessedVotes: len(blocks),
+		Results:        results,
+		ProcessedVotes: len(vcs.counted),
 	}, nil
 }
 
@@ -277,7 +368,21 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 	if err := json.Unmarshal(foundVote.EncryptedChoice, &pkg); err != nil {
 		result.Issues = append(result.Issues, "Invalid vote encryption package")
 	} else {
-		result.EncryptionValid = len(pkg.HomomorphicVoteData) > 0
+		// Check both vector-based and legacy formats
+		result.EncryptionValid = pkg.EncryptedVoteVector != nil && len(pkg.EncryptedVoteVector) > 0
+
+		// Additional verification for vector-based votes
+		if pkg.EncryptedVoteVector != nil && len(pkg.EncryptedVoteVector) > 0 {
+			// Get candidate registry
+			registry, err := vcs.cryptoService.GetOrCreateCandidateRegistry()
+			if err == nil {
+				if len(pkg.EncryptedVoteVector) != len(registry.Candidates) {
+					result.Issues = append(result.Issues, fmt.Sprintf(
+						"Vote vector length (%d) does not match candidate count (%d)",
+						len(pkg.EncryptedVoteVector), len(registry.Candidates)))
+				}
+			}
+		}
 	}
 
 	// Perform other verifications
@@ -288,16 +393,11 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 		result.ChainLinkValid = true
 	}
 
-	result.TimestampValid = foundVote.Timestamp > 0 &&
-		foundVote.Timestamp <= time.Now().Unix() &&
-		(previousBlock == nil || foundVote.Timestamp > previousBlock.Timestamp)
-
 	result.NonceValid = len(foundVote.Nonce) == 32
 
 	// Set final validity
 	result.IsValid = result.BlockValid &&
 		result.ChainLinkValid &&
-		result.TimestampValid &&
 		result.NonceValid &&
 		result.EncryptionValid
 
@@ -306,19 +406,29 @@ func (vcs *VoteCountingService) VerifyVote(privateKeyHex string) (*SingleVoteVer
 
 // GetLatestResults returns the current vote count without recounting
 func (vcs *VoteCountingService) GetLatestResults() (*VotingResults, error) {
+	// If results have already been counted, return them
 	vcs.mu.RLock()
-	defer vcs.mu.RUnlock()
+	if len(vcs.results) > 0 {
+		results := &VotingResults{
+			TotalVotes:     len(vcs.counted),
+			Results:        vcs.results,
+			ProcessedVotes: 0, // Will be set later
+		}
+		vcs.mu.RUnlock()
 
-	blocks, err := vcs.store.LoadChain("evb")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load EVB chain: %w", err)
+		// Get processed vote count
+		blocks, err := vcs.store.LoadChain("evb")
+		if err != nil {
+			return results, fmt.Errorf("warning: failed to get processed vote count: %w", err)
+		}
+		results.ProcessedVotes = len(blocks)
+
+		return results, nil
 	}
+	vcs.mu.RUnlock()
 
-	return &VotingResults{
-		TotalVotes:     len(vcs.counted),
-		Results:        vcs.results,
-		ProcessedVotes: len(blocks),
-	}, nil
+	// If no cached results, count them fresh
+	return vcs.CountVotes()
 }
 
 // VotingResults represents the final vote count

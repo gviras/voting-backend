@@ -17,9 +17,12 @@ import (
 )
 
 type VoteEncryptionPackage struct {
-	HomomorphicVoteData map[string][]byte `json:"homomorphic_votes"` // Map of encrypted choice identifiers to vote counts
-	ElectionData        []byte            `json:"election_data"`     // Election verification data
-	Nonce               []byte            `json:"nonce"`             // For vote verification
+	EncryptedVoteVector [][]byte `json:"encrypted_vote_vector,omitempty"`
+	Nonce               []byte   `json:"nonce"`
+}
+
+type CandidateRegistry struct {
+	Candidates []string `json:"candidates"`
 }
 
 // SchemeType represents the type of homomorphic encryption scheme
@@ -47,6 +50,133 @@ type SerializablePaillierPrivateKey struct {
 	PublicKey SerializablePaillierPublicKey `json:"public_key"`
 	Lambda    string                        `json:"lambda"` // Hex-encoded big.Int
 	Mu        string                        `json:"mu"`     // Hex-encoded big.Int
+}
+
+func (cs *CryptoService) VerifyVectorVote(voteData []byte) (map[string]interface{}, error) {
+	var pkg VoteEncryptionPackage
+	if err := json.Unmarshal(voteData, &pkg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal vote package: %v", err)
+	}
+
+	// Check if this is a vector-based vote
+	if pkg.EncryptedVoteVector == nil || len(pkg.EncryptedVoteVector) == 0 {
+		return nil, fmt.Errorf("not a vector-based vote")
+	}
+
+	// Get candidate registry
+	registry, err := cs.GetOrCreateCandidateRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get candidate registry: %v", err)
+	}
+
+	// Verify vector length matches candidate count
+	if len(pkg.EncryptedVoteVector) != len(registry.Candidates) {
+		return map[string]interface{}{
+			"valid": false,
+			"error": fmt.Sprintf("vector length (%d) does not match candidate count (%d)",
+				len(pkg.EncryptedVoteVector), len(registry.Candidates)),
+		}, nil
+	}
+
+	// Decrypt each position and verify vote integrity
+	voteCounts := make([]int64, len(pkg.EncryptedVoteVector))
+	totalVotes := int64(0)
+
+	for i, encryptedValue := range pkg.EncryptedVoteVector {
+		if encryptedValue == nil {
+			continue
+		}
+
+		value, err := cs.scheme.Decrypt(encryptedValue)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt vote at position %d: %v", i, err)
+		}
+
+		voteCounts[i] = value.Int64()
+		totalVotes += value.Int64()
+	}
+
+	// Verify that exactly one vote was cast (sum = 1)
+	isValid := totalVotes == 1
+
+	// Prepare result with vote information
+	candidateVotes := make(map[string]int64)
+	for i, count := range voteCounts {
+		if count > 0 {
+			candidateName := "Unknown"
+			if i < len(registry.Candidates) {
+				candidateName = registry.Candidates[i]
+			} else {
+				candidateName = fmt.Sprintf("Candidate %d", i+1)
+			}
+			candidateVotes[candidateName] = count
+		}
+	}
+
+	return map[string]interface{}{
+		"valid":          isValid,
+		"totalVotes":     totalVotes,
+		"voteCounts":     candidateVotes,
+		"candidateCount": len(registry.Candidates),
+		"vectorLength":   len(pkg.EncryptedVoteVector),
+	}, nil
+}
+
+func (cs *CryptoService) GetOrCreateCandidateRegistry() (*CandidateRegistry, error) {
+	// Define path for candidate registry storage
+	registryPath := filepath.Join(cs.storagePath, "candidate_registry.json")
+
+	// Try to read existing registry
+	data, err := os.ReadFile(registryPath)
+	if err == nil {
+		// Registry exists, unmarshal it
+		var registry CandidateRegistry
+		if err := json.Unmarshal(data, &registry); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal candidate registry: %v", err)
+		}
+		return &registry, nil
+	} else if !os.IsNotExist(err) {
+		// Some error other than file not existing
+		return nil, fmt.Errorf("failed to read candidate registry: %v", err)
+	}
+
+	// Registry doesn't exist, create a default one
+	defaultRegistry := &CandidateRegistry{
+		Candidates: []string{
+			"Candidate 1",
+			"Candidate 2",
+			"Candidate 3",
+			"Candidate 4",
+			"Candidate 5",
+		},
+	}
+
+	// Save the default registry
+	data, err = json.Marshal(defaultRegistry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal default candidate registry: %v", err)
+	}
+
+	if err := os.WriteFile(registryPath, data, 0644); err != nil {
+		return nil, fmt.Errorf("failed to save default candidate registry: %v", err)
+	}
+
+	return defaultRegistry, nil
+}
+
+func (cs *CryptoService) GetCandidateIndex(candidateName string) (int, error) {
+	registry, err := cs.GetOrCreateCandidateRegistry()
+	if err != nil {
+		return -1, err
+	}
+
+	for i, candidate := range registry.Candidates {
+		if candidate == candidateName {
+			return i, nil
+		}
+	}
+
+	return -1, fmt.Errorf("candidate '%s' not found in registry", candidateName)
 }
 
 func (cs *CryptoService) hashChoice(choice string) string {
@@ -204,30 +334,38 @@ func (cs *CryptoService) initializeElGamal() error {
 
 // For backward compatibility
 func (cs *CryptoService) EncryptVoteData(votePayload models.VotePayload) ([]byte, error) {
-	// Hash and store choice mapping
-	choiceHash := cs.storeChoiceMapping(votePayload.Choice)
-
-	homomorphicVotes := make(map[string][]byte)
-
-	// Use the current scheme for encryption
-	voteValue := big.NewInt(1) // We're encoding a single vote as 1
-	encryptedVote, err := cs.scheme.Encrypt(voteValue)
+	// Get the candidate registry
+	registry, err := cs.GetOrCreateCandidateRegistry()
 	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt vote: %v", err)
+		return nil, fmt.Errorf("failed to get candidate registry: %v", err)
 	}
 
-	// Store encrypted vote using the hex-encoded hash
-	homomorphicVotes[choiceHash] = encryptedVote
+	// Create a vote vector initialized with zeros
+	voteVector := make([]int64, len(registry.Candidates))
 
+	// Find the index of the chosen candidate and set that position to 1
+	chosenCandidateIndex, err := cs.GetCandidateIndex(votePayload.Choice)
+	if err != nil {
+		return nil, err
+	}
+
+	voteVector[chosenCandidateIndex] = 1
+
+	// Encrypt each element of the vote vector
+	encryptedVector := make([][]byte, len(voteVector))
+	for i, value := range voteVector {
+		encrypted, err := cs.scheme.Encrypt(big.NewInt(value))
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt vote vector element %d: %v", i, err)
+		}
+		encryptedVector[i] = encrypted
+	}
+
+	// Create the package with the encrypted vector
 	pkg := VoteEncryptionPackage{
-		HomomorphicVoteData: homomorphicVotes,
-		ElectionData:        nil,
+		EncryptedVoteVector: encryptedVector,
 		Nonce:               votePayload.Nonce,
 	}
-
-	// Debug log
-	fmt.Printf("Encrypting vote for choice=%s, hash=%s using %s\n",
-		votePayload.Choice, choiceHash, cs.scheme.Name())
 
 	return json.Marshal(pkg)
 }
@@ -238,32 +376,39 @@ func (cs *CryptoService) DecryptVoteData(encryptedData []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to unmarshal vote package: %v", err)
 	}
 
+	if pkg.EncryptedVoteVector == nil || len(pkg.EncryptedVoteVector) == 0 {
+		return nil, fmt.Errorf("invalid vote package: no encrypted vote vector found")
+	}
+
+	// Get candidate registry for proper naming
+	registry, err := cs.GetOrCreateCandidateRegistry()
+	if err != nil {
+		// Continue with numbered candidates if registry can't be loaded
+		fmt.Printf("Warning: Failed to load candidate registry: %v\n", err)
+	}
+
+	// Decrypt the vote vector
 	results := make(map[string]int64)
 
-	// Handle decryption based on scheme type
-	switch cs.schemeType {
-	case SchemePaillier:
-		// Paillier decryption (original implementation)
-		for choiceHash, encryptedVote := range pkg.HomomorphicVoteData {
-			// Decrypt using Paillier
-			decryptedValue, err := cs.scheme.Decrypt(encryptedVote)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt vote for choice %s: %v", choiceHash, err)
-			}
-			results[choiceHash] = decryptedValue.Int64()
+	for i, encryptedValue := range pkg.EncryptedVoteVector {
+		if encryptedValue == nil {
+			continue
 		}
 
-	case SchemeElGamal:
-		// ElGamal decryption with vote count extraction
-		for choiceHash, encryptedVote := range pkg.HomomorphicVoteData {
-			// Decrypt using ElGamal adapter (returns vote count directly)
-			decryptedValue, err := cs.scheme.Decrypt(encryptedVote)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt vote for choice %s: %v", choiceHash, err)
+		value, err := cs.scheme.Decrypt(encryptedValue)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt vote vector element %d: %v", i, err)
+		}
+
+		// Only add non-zero values to the results
+		if value.Int64() > 0 {
+			// Use the candidate name from registry if available, otherwise use index
+			candidateName := fmt.Sprintf("Candidate %d", i+1)
+			if registry != nil && i < len(registry.Candidates) {
+				candidateName = registry.Candidates[i]
 			}
 
-			// The discrete log solver in ElGamal adapter takes care of extracting the count
-			results[choiceHash] = decryptedValue.Int64()
+			results[candidateName] = value.Int64()
 		}
 	}
 
@@ -281,54 +426,50 @@ func (cs *CryptoService) AddEncryptedVotes(encryptedVote1, encryptedVote2 []byte
 		return nil, fmt.Errorf("failed to unmarshal second vote: %v", err)
 	}
 
-	summedVotes := make(map[string][]byte)
-
-	// Combine votes from both packages based on encryption scheme
-	for choiceHash, vote1 := range pkg1.HomomorphicVoteData {
-		if vote2, exists := pkg2.HomomorphicVoteData[choiceHash]; exists {
-			// Use the current scheme for homomorphic addition
-			summedVote, err := cs.scheme.Add(vote1, vote2)
-			if err != nil {
-				return nil, fmt.Errorf("failed to add votes for choice %s: %v", choiceHash, err)
-			}
-			summedVotes[choiceHash] = summedVote
-		} else {
-			summedVotes[choiceHash] = vote1
-		}
+	// Validate vote vectors
+	if pkg1.EncryptedVoteVector == nil || pkg2.EncryptedVoteVector == nil {
+		return nil, fmt.Errorf("invalid vote packages: missing vote vectors")
 	}
 
-	// Add any choices that only exist in pkg2
-	for choiceHash, vote2 := range pkg2.HomomorphicVoteData {
-		if _, exists := summedVotes[choiceHash]; !exists {
-			summedVotes[choiceHash] = vote2
+	// Ensure vectors have the same length
+	if len(pkg1.EncryptedVoteVector) != len(pkg2.EncryptedVoteVector) {
+		return nil, fmt.Errorf("vote vectors have different lengths (%d vs %d)",
+			len(pkg1.EncryptedVoteVector), len(pkg2.EncryptedVoteVector))
+	}
+
+	// Add corresponding elements
+	summedVector := make([][]byte, len(pkg1.EncryptedVoteVector))
+	for i := 0; i < len(pkg1.EncryptedVoteVector); i++ {
+		summed, err := cs.scheme.Add(pkg1.EncryptedVoteVector[i], pkg2.EncryptedVoteVector[i])
+		if err != nil {
+			return nil, fmt.Errorf("failed to add vote vector elements at index %d: %v", i, err)
 		}
+		summedVector[i] = summed
 	}
 
 	// Create the summed package
 	sumPkg := VoteEncryptionPackage{
-		HomomorphicVoteData: summedVotes,
+		EncryptedVoteVector: summedVector,
+		Nonce:               pkg1.Nonce, // Preserve a nonce for verification
 	}
 
 	return json.Marshal(sumPkg)
 }
 
+func (cs *CryptoService) GetVoteForCandidate(candidateName string) ([]byte, error) {
+	// Create a vote payload for the candidate
+	votePayload := models.VotePayload{
+		Choice:     candidateName,
+		ElectionID: "election-2024",
+		Nonce:      make([]byte, 32), // Generate a proper nonce in production
+	}
+
+	// Encrypt the vote using vector-based approach
+	return cs.EncryptVoteData(votePayload)
+}
+
 // The rest of your original CryptoService methods that don't directly deal with encryption/decryption
 // can remain mostly unchanged
-
-func (cs *CryptoService) StripVoterData(encryptedData []byte) ([]byte, error) {
-	var pkg VoteEncryptionPackage
-	if err := json.Unmarshal(encryptedData, &pkg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal vote package: %v", err)
-	}
-
-	// Keep only necessary data
-	anonymizedPkg := VoteEncryptionPackage{
-		HomomorphicVoteData: pkg.HomomorphicVoteData,
-		Nonce:               pkg.Nonce,
-	}
-
-	return json.Marshal(anonymizedPkg)
-}
 
 func (cs *CryptoService) GenerateKeyPair() (*ecdsa.PrivateKey, error) {
 	return crypto.GenerateKey()

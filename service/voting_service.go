@@ -170,8 +170,16 @@ func NewVotingService(storagePath string, schemeType encryption.SchemeType, keyS
 	metricsCollector := NewMetricsCollector()
 
 	session := NewVotingSession(24 * time.Hour)
-	anonymizer := NewAnonymizationService(100, 30*time.Minute)
-	countingService := NewVoteCountingService(cryptoService, store, metricsCollector)
+	anonymizer := NewAnonymizationService(25, 30*time.Minute)
+
+	tempIsVotingActive := func() bool { return true }
+
+	countingService := NewVoteCountingService(
+		cryptoService,
+		store,
+		metricsCollector,
+		tempIsVotingActive,
+	)
 
 	vs := &VotingService{
 		store:                store,
@@ -190,6 +198,8 @@ func NewVotingService(storagePath string, schemeType encryption.SchemeType, keyS
 		MetricsCollector:     metricsCollector,
 		useQueue:             false, // Default to synchronous processing
 	}
+
+	countingService.isVotingActiveFunc = vs.IsVotingActive
 
 	if err := vs.loadInitialVoters(); err != nil {
 		return nil, err
@@ -390,40 +400,20 @@ func (vs *VotingService) ResetMetrics() {
 	vs.MetricsCollector.Reset()
 }
 func (vs *VotingService) GetFinalResults() (*VotingResults, error) {
+	// Check if voting is still active
 	if vs.votingSession.IsActive() {
 		return nil, errors.New("voting is still active, final results not available")
 	}
 
-	// Get the encrypted results first
-	results, err := vs.GetCountingService().CountVotes()
+	// Get the decrypted results from the counting service
+	results, err := vs.countingService.GetFinalResults()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get final results: %w", err)
 	}
 
-	// Create new results with revealed choices
-	revealedResults := make(map[string]int64)
-
-	// Get the mapping
-	choiceMapping := vs.cryptoService.GetChoiceMapping()
-
-	fmt.Printf("\nProcessing final results:\n")
-	for hash, count := range results.Results {
-		fmt.Printf("Processing hash: %s (count: %d)\n", hash, count)
-
-		if candidateName, exists := choiceMapping[hash]; exists {
-			fmt.Printf("Found mapping: %s -> %s\n", hash, candidateName)
-			revealedResults[candidateName] = count
-		} else {
-			fmt.Printf("No mapping found for hash: %s\n", hash)
-			revealedResults[fmt.Sprintf("Unknown-%s", hash)] = count
-		}
-	}
-
-	return &VotingResults{
-		TotalVotes:     results.TotalVotes,
-		Results:        revealedResults,
-		ProcessedVotes: results.ProcessedVotes,
-	}, nil
+	// The results are already properly decoded with candidate names
+	// since the vector-based approach uses the registry
+	return results, nil
 }
 
 // Blockchain Methods
@@ -505,11 +495,19 @@ func (vs *VotingService) processBatchedVotes() error {
 			return fmt.Errorf("failed to unmarshal vote package: %v", err)
 		}
 
-		// Create stripped package with only homomorphic data
+		// Create stripped package preserving the appropriate data based on format
 		strippedPackage := encryption.VoteEncryptionPackage{
-			HomomorphicVoteData: votePackage.HomomorphicVoteData,
-			Nonce:               av.Nonce,
+			Nonce: av.Nonce,
 			// Omit other fields to strip voter data
+		}
+
+		// Handle both vector-based and legacy formats
+		if votePackage.EncryptedVoteVector != nil && len(votePackage.EncryptedVoteVector) > 0 {
+			// Vector-based approach - preserve the vector and candidate list
+			strippedPackage.EncryptedVoteVector = votePackage.EncryptedVoteVector
+		} else {
+			fmt.Printf("Vote has no valid encryption data\n")
+			return fmt.Errorf("vote has no valid encryption data")
 		}
 
 		// Marshal the stripped package
